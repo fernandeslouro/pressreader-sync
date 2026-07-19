@@ -1,0 +1,66 @@
+services:
+  bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.bridge
+    init: true
+    restart: unless-stopped
+    command:
+      - --library
+      - /library
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+      - --token
+      - ${PRESSREADER_SYNC_TOKEN:?Set PRESSREADER_SYNC_TOKEN in deploy/.env}
+      - --worker-status
+      - /state/worker-status.json
+    ports:
+      - "${PRESSREADER_SYNC_BIND:-0.0.0.0}:8787:8787"
+    volumes:
+      - ./data/library:/library:ro
+      - ./data/state:/state:ro
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    init: true
+    ipc: host
+    restart: unless-stopped
+    environment:
+      PRESSREADER_SYNC_INTERVAL_SECONDS: ${PRESSREADER_SYNC_INTERVAL_SECONDS:-21600}
+      PRESSREADER_SYNC_TIMEZONE: ${PRESSREADER_SYNC_TIMEZONE:-Europe/Lisbon}
+      PRESSREADER_SYNC_LOCALE: ${PRESSREADER_SYNC_LOCALE:-en-US}
+      PRESSREADER_MORE_SELECTOR: ${PRESSREADER_MORE_SELECTOR:-}
+      PRESSREADER_SYNC_EXPORT_DEVICE: ${PRESSREADER_SYNC_EXPORT_DEVICE:-Nook}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/browser:/data/browser
+      - ./data/library:/library
+      - ./data/state:/state
+    security_opt:
+      - no-new-privileges:true
+
+  login:
+    profiles: ["login"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    init: true
+    ipc: host
+    entrypoint: ["/app/login-entrypoint.sh"]
+    environment:
+      PRESSREADER_SYNC_TIMEZONE: ${PRESSREADER_SYNC_TIMEZONE:-Europe/Lisbon}
+      PRESSREADER_SYNC_LOCALE: ${PRESSREADER_SYNC_LOCALE:-en-US}
+    ports:
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - ./data/browser:/data/browser
+      - ./data/library:/library
+      - ./data/state:/state
+    security_opt:
+      - no-new-privileges:true

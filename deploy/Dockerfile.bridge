@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+
+RUN useradd --create-home --uid 1000 prsync
+COPY bridge/pressreader_sync_bridge.py /app/pressreader_sync_bridge.py
+USER prsync
+WORKDIR /app
+EXPOSE 8787
+ENTRYPOINT ["python", "/app/pressreader_sync_bridge.py"]

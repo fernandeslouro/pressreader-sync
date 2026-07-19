@@ -1,0 +1,14 @@
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
+
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        fluxbox gosu novnc websockify x11vnc xvfb \
+    && rm -rf /var/lib/apt/lists/*
+COPY automation/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY automation/epub_cleaner.py automation/pressreader_worker.py automation/login-entrypoint.sh automation/worker-entrypoint.sh /app/
+RUN chmod +x /app/login-entrypoint.sh /app/worker-entrypoint.sh
+WORKDIR /app
+ENTRYPOINT ["/app/worker-entrypoint.sh"]
+CMD ["python", "/app/pressreader_worker.py", "run"]
