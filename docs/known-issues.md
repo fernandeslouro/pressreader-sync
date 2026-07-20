@@ -20,11 +20,10 @@ local HotSpot/library entitlement, browser state not represented by cookies, or
 the client network. Do not assume that copying authentication data alone will
 make it available on the VPS.
 
-## Foreign Affairs contains duplicate articles
+## Foreign Affairs continuation articles
 
-The exported Foreign Affairs EPUB still shows duplicated articles after the
-current cleaner runs. Add the affected source EPUB as a private test fixture or
-construct a minimal equivalent fixture, identify how its duplicate entries
-differ in markup or identifiers, and extend the cleaner's content fingerprint
-and navigation pruning. The fix should retain legitimately distinct articles
-with similar headlines and should include a regression test.
+PressReader represents some long articles as separate body records on nearby
+print pages and repeats the headline for each record. These are continuations,
+not duplicate bodies, so removing them would truncate the article. The cleaner
+keeps every body record in the reading spine but collapses adjacent repeated
+headlines in NCX and HTML navigation. A regression test covers this layout.

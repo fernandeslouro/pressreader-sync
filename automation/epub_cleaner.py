@@ -276,7 +276,36 @@ def _extract_navigation(old_data: bytes, articles: list[Article], ncx_path: str)
     for article in articles:
         if article.unique_key not in included:
             nodes.append(NavigationNode(article.title, article=article))
-    return nodes
+    return _deduplicate_navigation(nodes)
+
+
+def _deduplicate_navigation(nodes: list[NavigationNode]) -> list[NavigationNode]:
+    """Hide adjacent continuation records without discarding their content.
+
+    Some magazine exports represent a long article as multiple ``art-cnt``
+    elements, normally separated by an image-only print page.  Their bodies
+    differ, so all records must stay in the spine, but repeating the headline
+    for every record makes KOReader's table of contents misleading.
+    """
+    last_article_by_title: dict[str, Article] = {}
+
+    def prune(items: list[NavigationNode]) -> list[NavigationNode]:
+        result: list[NavigationNode] = []
+        for node in items:
+            if node.article:
+                key = re.sub(r"\s+", " ", node.title).strip().casefold()
+                previous = last_article_by_title.get(key)
+                last_article_by_title[key] = node.article
+                if previous and 0 < node.article.page_number - previous.page_number <= 2:
+                    continue
+                result.append(node)
+                continue
+            node.children = prune(node.children)
+            if node.children:
+                result.append(node)
+        return result
+
+    return prune(nodes)
 
 
 def _build_ncx(old_data: bytes, nodes: list[NavigationNode], ncx_path: str) -> bytes:

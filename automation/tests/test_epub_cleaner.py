@@ -9,7 +9,7 @@ from xml.etree import ElementTree as ET
 AUTOMATION = Path(__file__).parents[1]
 sys.path.insert(0, str(AUTOMATION))
 
-from epub_cleaner import clean_pressreader_epub
+from epub_cleaner import Article, NavigationNode, _deduplicate_navigation, clean_pressreader_epub
 
 
 XHTML = "http://www.w3.org/1999/xhtml"
@@ -33,6 +33,20 @@ def page(article_id="", title="", body="", image="", short=False):
 
 
 class EpubCleanerTest(unittest.TestCase):
+    def test_continuation_articles_have_one_navigation_entry(self):
+        element = ET.Element("article")
+        first = Article("page-010/page-010.xhtml", element, "art-1", "Long Report", 10, "a", "first")
+        continuation = Article("page-012/page-012.xhtml", element, "art-1", "Long Report", 12, "b", "continuation")
+        later_story = Article("page-020/page-020.xhtml", element, "art-1", "Long Report", 20, "c", "later")
+
+        nodes = _deduplicate_navigation([
+            NavigationNode("Long Report", article=first),
+            NavigationNode("Long Report", article=continuation),
+            NavigationNode("Long Report", article=later_story),
+        ])
+
+        self.assertEqual([node.article.unique_key for node in nodes], ["first", "later"])
+
     def make_epub(self, path):
         long_body = "The same complete article body appears on several physical pages. " * 4
         opf = """<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
