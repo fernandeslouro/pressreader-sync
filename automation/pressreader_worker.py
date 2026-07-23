@@ -335,23 +335,32 @@ class PressReaderAutomation:
         return "exported"
 
 
-def launch_context(playwright: Any, profile: Path, headless: bool) -> BrowserContext:
+def launch_context(
+    playwright: Any,
+    profile: Path,
+    headless: bool,
+    proxy_server: str = "",
+) -> BrowserContext:
     profile.mkdir(parents=True, exist_ok=True)
-    return playwright.chromium.launch_persistent_context(
-        user_data_dir=str(profile),
-        headless=headless,
-        accept_downloads=True,
-        viewport={"width": 1440, "height": 1000},
-        locale=os.environ.get(
+    options: dict[str, Any] = {
+        "user_data_dir": str(profile),
+        "headless": headless,
+        "accept_downloads": True,
+        "viewport": {"width": 1440, "height": 1000},
+        "locale": os.environ.get(
             "PRESSREADER_SYNC_LOCALE",
             os.environ.get("PRESSREADER_SHELF_LOCALE", os.environ.get("PRESSKO_LOCALE", "en-US")),
         ),
-        timezone_id=os.environ.get(
+        "timezone_id": os.environ.get(
             "PRESSREADER_SYNC_TIMEZONE",
             os.environ.get("PRESSREADER_SHELF_TIMEZONE", os.environ.get("PRESSKO_TIMEZONE", "Europe/Lisbon")),
         ),
-        args=["--disable-dev-shm-usage"],
-    )
+        "args": ["--disable-dev-shm-usage"],
+    }
+    proxy_server = proxy_server.strip() or os.environ.get("PRESSREADER_SYNC_PROXY", "").strip()
+    if proxy_server:
+        options["proxy"] = {"server": proxy_server}
+    return playwright.chromium.launch_persistent_context(**options)
 
 
 def interactive_login(profile: Path) -> int:
@@ -373,19 +382,34 @@ def run_once(
     diagnostics: Path,
     catalog_url: str,
     limit: int = 0,
+    proxy_server: str = "",
+    only_title: str = "",
+    exclude_title: str = "",
 ) -> RunStatus:
     state = StateStore(state_dir)
     status = RunStatus(state="running", started_at=datetime.now(timezone.utc).isoformat())
     state.write_status(status)
     with sync_playwright() as playwright:
-        context = launch_context(playwright, profile, headless=True)
+        context = launch_context(playwright, profile, headless=True, proxy_server=proxy_server)
         try:
             page = context.pages[0] if context.pages else context.new_page()
             automation = PressReaderAutomation(page, library, state, diagnostics)
             publications = automation.discover_my_publications(catalog_url)
-            status.discovered = len(publications)
+            if only_title:
+                publications = [
+                    publication
+                    for publication in publications
+                    if publication.title.casefold() == only_title.casefold()
+                ]
+            if exclude_title:
+                publications = [
+                    publication
+                    for publication in publications
+                    if publication.title.casefold() != exclude_title.casefold()
+                ]
             if limit > 0:
                 publications = publications[:limit]
+            status.discovered = len(publications)
             for publication in publications:
                 if STOP:
                     break
@@ -408,6 +432,51 @@ def run_once(
     status.state = "error" if status.errors else "ok"
     state.write_status(status)
     return status
+
+
+def run_cycle(
+    profile: Path,
+    library: Path,
+    state_dir: Path,
+    diagnostics: Path,
+    catalog_url: str,
+    limit: int = 0,
+) -> RunStatus:
+    special_proxy = os.environ.get("PRESSREADER_SYNC_SPECIAL_PROXY", "").strip()
+    special_title = os.environ.get("PRESSREADER_SYNC_SPECIAL_TITLE", "").strip()
+    if not special_proxy or not special_title:
+        return run_once(profile, library, state_dir, diagnostics, catalog_url, limit)
+
+    direct = run_once(
+        profile,
+        library,
+        state_dir,
+        diagnostics,
+        catalog_url,
+        limit,
+        exclude_title=special_title,
+    )
+    special = run_once(
+        profile,
+        library,
+        state_dir,
+        diagnostics,
+        catalog_url,
+        limit,
+        proxy_server=special_proxy,
+        only_title=special_title,
+    )
+    combined = RunStatus(
+        state="error" if direct.errors or special.errors else "ok",
+        started_at=direct.started_at,
+        finished_at=special.finished_at,
+        discovered=direct.discovered + special.discovered,
+        exported=direct.exported + special.exported,
+        skipped=direct.skipped + special.skipped,
+        errors=direct.errors + special.errors,
+    )
+    StateStore(state_dir).write_status(combined)
+    return combined
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -438,12 +507,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "login":
         return interactive_login(args.profile)
     if args.command == "once":
-        status = run_once(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
+        status = run_cycle(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
         return 1 if status.errors else 0
     interval = max(300, args.interval)
     while not STOP:
         started = time.monotonic()
-        status = run_once(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
+        status = run_cycle(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
         remaining = max(0, interval - int(time.monotonic() - started))
         status.next_run_at = datetime.fromtimestamp(time.time() + remaining, timezone.utc).isoformat()
         StateStore(args.state).write_status(status)

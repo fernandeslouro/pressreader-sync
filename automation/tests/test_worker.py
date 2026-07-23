@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).parents[1] / "pressreader_worker.py"
 sys.path.insert(0, str(MODULE_PATH.parent))
@@ -39,6 +40,17 @@ class WorkerHelpersTest(unittest.TestCase):
             bad.write_text("not an epub", encoding="utf-8")
             self.assertTrue(self.worker.is_epub(good))
             self.assertFalse(self.worker.is_epub(bad))
+
+    def test_launch_context_uses_configured_proxy(self):
+        playwright = mock.Mock()
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.dict(
+                self.worker.os.environ,
+                {"PRESSREADER_SYNC_PROXY": "http://10.203.0.2:8888"},
+            ):
+                self.worker.launch_context(playwright, Path(temp) / "profile", True)
+        options = playwright.chromium.launch_persistent_context.call_args.kwargs
+        self.assertEqual(options["proxy"], {"server": "http://10.203.0.2:8888"})
 
 
 if __name__ == "__main__":
