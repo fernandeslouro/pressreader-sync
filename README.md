@@ -55,6 +55,10 @@ Use **Download all latest editions** to fetch the newest available edition of
 every publication in one batch. Editions already downloaded at the expected
 file size are skipped, and the plugin reports any publication that failed.
 
+**Downloaded publications** groups editions by publication and shows the newest
+issue date. Publications and their editions are ordered by when they were
+downloaded, so future-dated issues do not stay pinned to the top.
+
 The bridge prints its usable LAN addresses at startup. Keep it on a trusted
 network, set a token, and allow TCP port 8787 through the host firewall if
 needed. HTTP is intentional for simple local networks; use a reverse proxy if
