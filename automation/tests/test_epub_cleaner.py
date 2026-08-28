@@ -9,7 +9,16 @@ from xml.etree import ElementTree as ET
 AUTOMATION = Path(__file__).parents[1]
 sys.path.insert(0, str(AUTOMATION))
 
-from epub_cleaner import Article, NavigationNode, _deduplicate_navigation, clean_pressreader_epub
+from epub_cleaner import (
+    Article,
+    NavigationNode,
+    _deduplicate_navigation,
+    _mark_subtitle_only_headers,
+    _normalize_byline_case,
+    clean_pressreader_epub,
+    reader_style_is_current,
+    style_pressreader_epub,
+)
 
 
 XHTML = "http://www.w3.org/1999/xhtml"
@@ -46,6 +55,25 @@ class EpubCleanerTest(unittest.TestCase):
         ])
 
         self.assertEqual([node.article.unique_key for node in nodes], ["first", "later"])
+
+    def test_subtitle_only_header_keeps_title_emphasis(self):
+        root = ET.fromstring(
+            f'<div xmlns="{XHTML}" class="article-header"><h2>Only title</h2></div>'
+        )
+        _mark_subtitle_only_headers(root)
+        self.assertEqual(root.get("class"), "article-header title-from-subtitle")
+
+    def test_uppercase_bylines_are_normalized_safely(self):
+        root = ET.fromstring(
+            f'<div xmlns="{XHTML}"><p class="byline">'
+            '| BY JOHN MCCORMICK AND ZIA UR-REHMAN / AFP writer@example.com'
+            '</p></div>'
+        )
+        _normalize_byline_case(root)
+        self.assertEqual(
+            "".join(root.itertext()),
+            "By John McCormick and Zia Ur-Rehman / AFP writer@example.com",
+        )
 
     def make_epub(self, path):
         long_body = "The same complete article body appears on several physical pages. " * 4
@@ -111,15 +139,39 @@ class EpubCleanerTest(unittest.TestCase):
                 self.assertNotIn("OEBPS/page-005/thumb.jpeg", names)
                 self.assertNotIn("OEBPS/thumbnails.xhtml", names)
                 self.assertNotIn("OEBPS/css/style.css", names)
+                self.assertIn("OEBPS/pressko.css", names)
                 self.assertNotIn("OEBPS/page-001/page-001.xhtml", names)
                 text = "".join(archive.read(name).decode("utf-8", "ignore") for name in names if name.endswith(".xhtml"))
                 self.assertNotIn("art-divider", text)
                 self.assertNotIn("page-header", text)
                 self.assertNotIn("legal-header", text)
-                self.assertNotIn("class=", text)
                 self.assertNotIn("style=", text)
+                self.assertIn('class="article"', text)
+                self.assertIn('class="article-header"', text)
+                self.assertIn('class="media has-legend"', text)
+                self.assertIn('class="caption"', text)
+                self.assertIn('class="legend short"', text)
                 self.assertIn("Main Story", text)
                 self.assertIn("Cartoon", text)
+                css = archive.read("OEBPS/pressko.css").decode("utf-8")
+                self.assertIn("max-width: 100%", css)
+                self.assertIn("page-break-before: always", css)
+                self.assertNotIn("border-bottom", css)
+                self.assertIn("p { margin: 0 0 0.16em", css)
+                self.assertIn(".toc li { margin: 0.1em", css)
+                self.assertIn(".legend.short { max-width: 14em", css)
+                self.assertIn(".legend.medium { max-width: 18em", css)
+                self.assertIn(".legend.long { max-width: 24em", css)
+                self.assertNotIn("max-height:", css)
+                self.assertNotIn("caption-side:", css)
+                self.assertIn("text-align: center", css)
+                self.assertIn("line-height: 1.27", css)
+                self.assertIn("font-size: 0.92em", css)
+                self.assertIn("font-size: 1.45em", css)
+                self.assertIn("font-size: 0.78em", css)
+                self.assertIn("font-weight: normal", css)
+                styled_page = archive.read("OEBPS/page-005/page-005.xhtml").decode("utf-8")
+                self.assertLess(styled_page.index("art_photo.jpeg"), styled_page.index("Caption"))
                 ncx = ET.fromstring(archive.read("OEBPS/toc.ncx"))
                 ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
                 top_labels = [
@@ -143,6 +195,29 @@ class EpubCleanerTest(unittest.TestCase):
                                     posixpath.dirname(name), reference.split("#", 1)[0]
                                 ))
                                 self.assertIn(target, names, f"broken reference from {name}: {reference}")
+
+    def test_style_only_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            epub = Path(temp) / "issue.epub"
+            self.make_epub(epub)
+            self.assertFalse(reader_style_is_current(epub))
+            clean_pressreader_epub(epub)
+            self.assertTrue(reader_style_is_current(epub))
+            style_pressreader_epub(epub)
+            style_pressreader_epub(epub)
+            self.assertTrue(reader_style_is_current(epub))
+            with zipfile.ZipFile(epub) as archive:
+                names = archive.namelist()
+                self.assertEqual(names.count("OEBPS/pressko.css"), 1)
+                opf = ET.fromstring(archive.read("OEBPS/content.opf"))
+                ns = {"o": "http://www.idpf.org/2007/opf"}
+                styles = [
+                    item for item in opf.findall("o:manifest/o:item", ns)
+                    if item.get("media-type") == "text/css"
+                ]
+                self.assertEqual(len(styles), 1)
+                page_text = archive.read("OEBPS/page-005/page-005.xhtml").decode("utf-8")
+                self.assertEqual(page_text.count("pressko.css"), 1)
 
 
 if __name__ == "__main__":
