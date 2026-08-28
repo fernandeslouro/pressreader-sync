@@ -403,7 +403,9 @@ function PressReaderSync:oldEditionCandidates()
         if type(record) == "table" and record.path and record.publication_title then
             local attributes = lfs.attributes(record.path)
             if attributes and attributes.mode == "file" then
-                local publication_key = tostring(record.publication_id or record.publication_title)
+                -- Use the title for recorded and older filename-only downloads,
+                -- so upgrading does not split one publication into two retention groups.
+                local publication_key = tostring(record.publication_title)
                 groups[publication_key] = groups[publication_key] or {}
                 table.insert(groups[publication_key], {
                     name = record.issue_title or record.path:match("([^/]+)$") or record.path,
@@ -421,7 +423,7 @@ function PressReaderSync:oldEditionCandidates()
             local path = directory .. "/" .. name
             local attributes = not tracked_paths[path] and publication_name and lfs.attributes(path)
             if attributes and attributes.mode == "file" then
-                local publication_key = "legacy:" .. publication_name
+                local publication_key = publication_name
                 groups[publication_key] = groups[publication_key] or {}
                 table.insert(groups[publication_key], {
                     name = name, path = path, modified = attributes.modification or 0,
@@ -509,6 +511,24 @@ function PressReaderSync:removeOldEditions(candidates)
     })
 end
 
+function PressReaderSync:removeDownloadedEdition(path)
+    local modules_ok, DocSettings, ReadCollection, ReadHistory = pcall(function()
+        return require("docsettings"), require("readcollection"), require("readhistory")
+    end)
+    if not modules_ok then return nil, DocSettings end
+
+    local removed, remove_err = os.remove(path)
+    if not removed then return nil, remove_err end
+    self:forgetDownload(path)
+
+    local housekeeping_ok, housekeeping_err = pcall(function()
+        DocSettings.updateLocation(path)
+        ReadHistory:removeItemByPath(path)
+        ReadCollection:removeItem(path)
+    end)
+    return true, not housekeeping_ok and housekeeping_err or nil
+end
+
 function PressReaderSync:showDownloads()
     local directory = self:downloadDirectory()
     local available = {}
@@ -524,7 +544,7 @@ function PressReaderSync:showDownloads()
         end
     end
 
-    local groups_by_id = {}
+    local groups_by_publication = {}
     local tracked_paths = {}
     local records = self:downloadRecords()
     local records_changed = false
@@ -535,8 +555,8 @@ function PressReaderSync:showDownloads()
             table.insert(stale_record_keys, key)
         elseif record.publication_title and record.publication_title ~= "" then
             tracked_paths[record.path] = true
-            local group_id = tostring(record.publication_id or record.publication_title)
-            local group = groups_by_id[group_id]
+            local group_id = tostring(record.publication_title)
+            local group = groups_by_publication[group_id]
             if not group then
                 group = {
                     title = record.publication_title,
@@ -544,7 +564,7 @@ function PressReaderSync:showDownloads()
                     last_downloaded = 0,
                     editions = {},
                 }
-                groups_by_id[group_id] = group
+                groups_by_publication[group_id] = group
             end
             local downloaded_at = tonumber(record.downloaded_at)
                 or file.attributes.modification or 0
@@ -572,25 +592,47 @@ function PressReaderSync:showDownloads()
     local other_group
     for path, file in pairs(available) do
         if not tracked_paths[path] then
-            if not other_group then
-                other_group = {
-                    title = _("Other downloads"), latest_date = "",
-                    last_downloaded = 0, editions = {}, is_other = true,
-                }
-            end
             local modified = file.attributes.modification or 0
-            other_group.last_downloaded = math.max(other_group.last_downloaded, modified)
-            table.insert(other_group.editions, {
-                text = file.name,
-                mandatory = readableSize(file.attributes.size),
-                path = path,
-                downloaded_at = modified,
-            })
+            local publication_title = publicationNameFromDownloadedFilename(file.name)
+            local issue_date = file.name:match("^(%d%d%d%d%-%d%d%-%d%d)") or ""
+            if publication_title then
+                local group = groups_by_publication[publication_title]
+                if not group then
+                    group = {
+                        title = publication_title, latest_date = "",
+                        last_downloaded = 0, editions = {},
+                    }
+                    groups_by_publication[publication_title] = group
+                end
+                group.last_downloaded = math.max(group.last_downloaded, modified)
+                if issue_date > group.latest_date then group.latest_date = issue_date end
+                table.insert(group.editions, {
+                    text = file.name,
+                    mandatory = string.format("%s · %s", issue_date,
+                        readableSize(file.attributes.size)),
+                    path = path,
+                    downloaded_at = modified,
+                })
+            else
+                if not other_group then
+                    other_group = {
+                        title = _("Other downloads"), latest_date = "",
+                        last_downloaded = 0, editions = {}, is_other = true,
+                    }
+                end
+                other_group.last_downloaded = math.max(other_group.last_downloaded, modified)
+                table.insert(other_group.editions, {
+                    text = file.name,
+                    mandatory = readableSize(file.attributes.size),
+                    path = path,
+                    downloaded_at = modified,
+                })
+            end
         end
     end
 
     local groups = {}
-    for _, group in pairs(groups_by_id) do table.insert(groups, group) end
+    for _, group in pairs(groups_by_publication) do table.insert(groups, group) end
     if other_group then table.insert(groups, other_group) end
     if #groups == 0 then
         UIManager:show(InfoMessage:new{ text = _("No downloaded editions yet.") })
@@ -638,16 +680,16 @@ function PressReaderSync:showDownloadedEditions(group)
             UIManager:show(ConfirmBox:new{
                 text = T(_("Delete %1?"), item.text), ok_text = _("Delete"),
                 ok_callback = function()
-                    local removed, err = os.remove(item.path)
+                    local removed, err = self:removeDownloadedEdition(item.path)
                     if not removed then
                         self:showError(err)
                         return
                     end
-                    self:forgetDownload(item.path)
                     for index, row in ipairs(items) do
                         if row.path == item.path then table.remove(items, index) break end
                     end
                     if #items == 0 then UIManager:close(menu) else menu:switchItemTable(nil, items) end
+                    if err then self:showError(err) end
                 end,
             })
             return true
