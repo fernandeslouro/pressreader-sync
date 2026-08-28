@@ -43,7 +43,7 @@ BYLINE_PARTICLES = {
     "LOS": "los", "VAN": "van", "VON": "von", "Y": "y",
 }
 
-READER_CSS = b"""/* Pressko KOReader stylesheet v4; deliberately device-neutral. */
+READER_CSS = b"""/* Pressko KOReader stylesheet v5; deliberately device-neutral. */
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -53,11 +53,17 @@ body {
   widows: 2;
 }
 .article { margin: 0; padding: 0; }
-.article + .article {
-  break-before: page;
-  page-break-before: always;
+.article + .article { margin-top: 1.4em; }
+.article-header {
+  margin: 0 0 0.65em;
+  padding: 0;
+  break-after: avoid;
+  page-break-after: avoid;
 }
-.article-header { margin: 0 0 0.65em; padding: 0; }
+.article-header + * {
+  break-before: avoid;
+  page-break-before: avoid;
+}
 h1 {
   margin: 0 0 0.3em;
   padding: 0;
@@ -65,6 +71,8 @@ h1 {
   line-height: 1.08;
   font-weight: bold;
   text-align: left;
+  break-inside: avoid;
+  page-break-inside: avoid;
   break-after: avoid;
   page-break-after: avoid;
 }
@@ -75,6 +83,8 @@ h2 {
   line-height: 1.3;
   font-weight: normal;
   text-align: left;
+  break-inside: avoid;
+  page-break-inside: avoid;
   break-after: avoid;
   page-break-after: avoid;
 }

@@ -208,7 +208,16 @@ class EpubCleanerTest(unittest.TestCase):
                 self.assertIn("Cartoon", text)
                 css = archive.read("OEBPS/pressko.css").decode("utf-8")
                 self.assertIn("max-width: 100%", css)
-                self.assertIn("page-break-before: always", css)
+                self.assertNotIn("page-break-before: always", css)
+                self.assertIn(".article + .article { margin-top: 1.4em; }", css)
+                self.assertIn(
+                    ".article-header + * {\n  break-before: avoid;\n  page-break-before: avoid;\n}",
+                    css,
+                )
+                self.assertIn(
+                    "break-inside: avoid;\n  page-break-inside: avoid;\n  break-after: avoid;",
+                    css,
+                )
                 self.assertNotIn("border-bottom", css)
                 self.assertIn("p { margin: 0 0 0.16em", css)
                 self.assertIn(".toc li { margin: 0.1em", css)
