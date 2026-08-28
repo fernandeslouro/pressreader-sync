@@ -459,8 +459,13 @@ class PressReaderAutomation:
             record = self.state.ledger.get(normalized_url(publication.url), {})
             exported_file = Path(str(record.get("file", "")))
             if exported_file.is_file() and not reader_style_is_current(exported_file):
-                style_pressreader_epub(exported_file)
-                LOG.info("Updated reader styling for %s dated %s", publication.title, issue_date)
+                removed = style_pressreader_epub(exported_file)
+                LOG.info(
+                    "Updated reader styling for %s dated %s (%d redundant callout elements removed)",
+                    publication.title,
+                    issue_date,
+                    removed,
+                )
             LOG.info("Already have %s dated %s", publication.title, issue_date)
             self.page.keyboard.press("Escape")
             self.state.clear_failure(publication.url)
@@ -488,12 +493,13 @@ class PressReaderAutomation:
 
         cleanup = clean_pressreader_epub(temporary)
         LOG.info(
-            "Cleaned %s: %d/%d articles kept, %d duplicates and %d page assets removed, %.1f%% smaller",
+            "Cleaned %s: %d/%d articles kept, %d duplicates, %d page assets and %d redundant callout elements removed, %.1f%% smaller",
             publication.title,
             cleanup.articles_kept,
             cleanup.articles_found,
             cleanup.duplicates_removed,
             cleanup.assets_removed,
+            cleanup.pullquote_elements_removed,
             100 * (cleanup.original_bytes - cleanup.cleaned_bytes) / cleanup.original_bytes,
         )
 

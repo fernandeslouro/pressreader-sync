@@ -15,6 +15,7 @@ from epub_cleaner import (
     _deduplicate_navigation,
     _mark_subtitle_only_headers,
     _normalize_byline_case,
+    _remove_redundant_pullquotes,
     clean_pressreader_epub,
     reader_style_is_current,
     style_pressreader_epub,
@@ -42,6 +43,58 @@ def page(article_id="", title="", body="", image="", short=False):
 
 
 class EpubCleanerTest(unittest.TestCase):
+    def test_repeated_pullquote_and_attribution_are_removed_atomically(self):
+        article = ET.fromstring(f'''<div xmlns="{XHTML}" class="article">
+          <div class="article-header"><h1>Test</h1>
+            <blockquote class="standfirst">‘There are no new kinds of airplane accidents in the modern world.’ WALLY FUNK</blockquote>
+          </div>
+          <p>She concluded that “there are no new kinds of airplane accidents in the modern world,” after reviewing the evidence carefully.</p>
+          <p>‘There are no new kinds of airplane accidents in the modern world.’</p>
+          <p>WALLY FUNK</p>
+        </div>''')
+
+        removed = _remove_redundant_pullquotes(article)
+        remaining = [" ".join("".join(item.itertext()).split()) for item in article.iter()]
+
+        self.assertEqual(removed, 3)
+        self.assertTrue(any(value.startswith("She concluded") for value in remaining))
+        self.assertFalse(any(value == "WALLY FUNK" for value in remaining))
+        self.assertFalse(any(item.tag.endswith("blockquote") for item in article.iter()))
+
+    def test_ambiguous_attribution_pair_is_kept(self):
+        article = ET.fromstring(f'''<div xmlns="{XHTML}" class="article">
+          <div class="article-header"><h1>Test</h1></div>
+          <p>She concluded that “there are no new kinds of airplane accidents in the modern world,” after reviewing the evidence carefully.</p>
+          <p>‘There are no new kinds of airplane accidents in the modern world.’</p>
+          <p>WALLY FUNK</p>
+        </div>''')
+
+        self.assertEqual(_remove_redundant_pullquotes(article), 0)
+        self.assertIn("WALLY FUNK", " ".join(article.itertext()))
+
+    def test_unattributed_repeated_pullquote_is_removed(self):
+        article = ET.fromstring(f'''<div xmlns="{XHTML}" class="article">
+          <div class="article-header"><h1>Test</h1></div>
+          <p>Washington cannot halt the rapid proliferation of advanced AI capabilities, but it can still gain a small edge over its rivals.</p>
+          <p>Washington cannot halt the rapid proliferation of advanced AI.</p>
+        </div>''')
+
+        self.assertEqual(_remove_redundant_pullquotes(article), 1)
+        self.assertNotIn(
+            "<p>Washington cannot halt the rapid proliferation of advanced AI.</p>",
+            ET.tostring(article, encoding="unicode"),
+        )
+
+    def test_bibliographic_title_is_not_treated_as_pullquote(self):
+        article = ET.fromstring(f'''<div xmlns="{XHTML}" class="article">
+          <div class="article-header"><h1>Review</h1></div>
+          <p>The critic examines Inside the Imperial Presidency of Donald Trump by Maggie Haberman and Jonathan Swan in detail.</p>
+          <p>Inside the Imperial Presidency of Donald Trump by Maggie Haberman and Jonathan Swan.</p>
+        </div>''')
+
+        self.assertEqual(_remove_redundant_pullquotes(article), 0)
+        self.assertIn("Inside the Imperial Presidency", " ".join(article.itertext()))
+
     def test_continuation_articles_have_one_navigation_entry(self):
         element = ET.Element("article")
         first = Article("page-010/page-010.xhtml", element, "art-1", "Long Report", 10, "a", "first")

@@ -15,6 +15,7 @@ import os
 import posixpath
 import re
 import tempfile
+import unicodedata
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -28,6 +29,13 @@ DC_NS = "http://purl.org/dc/elements/1.1/"
 CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 READER_STYLE_NAME = "pressko.css"
+PULLQUOTE_EXCLUDED_CLASSES = {
+    "annotation", "article-header", "byline", "caption", "image-credit",
+    "img-art", "img-byline", "img-text", "legend", "media", "standfirst",
+}
+PULLQUOTE_SENTENCE_END = re.compile(r"[.!?…][\s\"'’”»)]*$")
+PULLQUOTE_OPENING_QUOTE = re.compile(r"^[\s\"'‘“«]")
+PULLQUOTE_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 BYLINE_ACRONYMS = {"AFP", "AP", "EFE", "EPA", "FMI", "PA", "NYT", "WSJ"}
 BYLINE_PARTICLES = {
     "AND": "and", "DA": "da", "DAS": "das", "DE": "de", "DEL": "del",
@@ -35,7 +43,7 @@ BYLINE_PARTICLES = {
     "LOS": "los", "VAN": "van", "VON": "von", "Y": "y",
 }
 
-READER_CSS = b"""/* Pressko KOReader stylesheet v3; deliberately device-neutral. */
+READER_CSS = b"""/* Pressko KOReader stylesheet v4; deliberately device-neutral. */
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -151,6 +159,7 @@ class CleanupStats:
     duplicates_removed: int
     page_documents_removed: int
     assets_removed: int
+    pullquote_elements_removed: int
     original_bytes: int
     cleaned_bytes: int
 
@@ -200,6 +209,165 @@ def _has_class(element: ET.Element, name: str) -> bool:
 
 def _text(element: ET.Element) -> str:
     return re.sub(r"\s+", " ", "".join(element.itertext())).strip()
+
+
+def _pullquote_normalize(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value.replace("\u00ad", "")).casefold()
+    return " ".join(PULLQUOTE_WORD.findall(value))
+
+
+def _pullquote_is_all_caps(value: str) -> bool:
+    letters = [character for character in value if character.isalpha()]
+    return bool(letters) and len(letters) >= 5 and (
+        sum(character.isupper() for character in letters) / len(letters) >= 0.82
+    )
+
+
+def _pullquote_is_title_case(value: str) -> bool:
+    words = [
+        word for word in re.findall(r"[^\W\d_]+", value, re.UNICODE)
+        if len(word) > 1
+    ]
+    if len(words) < 5:
+        return False
+    return sum(word[0].isupper() for word in words) / len(words) >= 0.65
+
+
+def _pullquote_body_paragraphs(article: ET.Element) -> list[ET.Element]:
+    parents = {child: parent for parent in article.iter() for child in parent}
+    children = list(article)
+    header = children[0] if children and (
+        "article-header" in _classes(children[0])
+        or any(_local_name(item.tag) in {"h1", "h2"} for item in children[0].iter())
+    ) else None
+    media = {
+        item for item in article.iter()
+        if "media" in _classes(item)
+        or (
+            _local_name(item.tag) == "div"
+            and any(_local_name(child.tag) == "img" for child in item.iter())
+        )
+    }
+    result: list[ET.Element] = []
+    for item in article.iter():
+        if _local_name(item.tag) != "p":
+            continue
+        current: ET.Element | None = item
+        excluded = False
+        while current is not None and current is not article:
+            if (
+                current is header
+                or current in media
+                or _classes(current) & PULLQUOTE_EXCLUDED_CLASSES
+            ):
+                excluded = True
+                break
+            current = parents.get(current)
+        if not excluded and _text(item):
+            result.append(item)
+    return result
+
+
+def _pullquote_candidates(paragraphs: list[ET.Element]) -> set[ET.Element]:
+    values = [_text(item) for item in paragraphs]
+    normalized = [_pullquote_normalize(value) for value in values]
+    candidates: set[ET.Element] = set()
+    for index, value in enumerate(values):
+        words = normalized[index].split()
+        if not (8 <= len(words) <= 45 and 45 <= len(value) <= 300):
+            continue
+        quoted = bool(PULLQUOTE_OPENING_QUOTE.match(value))
+        if not value[0].isupper() and not quoted:
+            continue
+        if _pullquote_is_all_caps(value):
+            continue
+        if not quoted and not PULLQUOTE_SENTENCE_END.search(value):
+            continue
+        if not quoted and _pullquote_is_title_case(value):
+            continue
+        if any(
+            index != other_index
+            and normalized[index] in other
+            and len(other.split()) >= len(words) + 4
+            for other_index, other in enumerate(normalized)
+        ):
+            candidates.add(paragraphs[index])
+    return candidates
+
+
+def _pullquote_looks_like_attribution(value: str) -> bool:
+    if len(value) > 180:
+        return False
+    letters = [character for character in value if character.isalpha()]
+    return bool(letters) and (
+        sum(character.isupper() for character in letters) / len(letters) >= 0.45
+    )
+
+
+def _remove_redundant_pullquotes(article: ET.Element) -> int:
+    """Remove only callouts proven to repeat a longer paragraph in *article*.
+
+    PressReader commonly emits the same print pull quote in a header annotation
+    and as one or more ordinary body paragraphs. Exact annotation/body blocks
+    are removed atomically so speaker attributions are not left behind.
+    """
+    paragraphs = _pullquote_body_paragraphs(article)
+    candidates = _pullquote_candidates(paragraphs)
+    if not candidates:
+        return 0
+
+    parents = {child: parent for parent in article.iter() for child in parent}
+    children = list(article)
+    header = children[0] if children and (
+        "article-header" in _classes(children[0])
+        or any(_local_name(item.tag) in {"h1", "h2"} for item in children[0].iter())
+    ) else None
+    annotations = [
+        item for item in (header.iter() if header is not None else [])
+        if _local_name(item.tag) == "blockquote"
+        or _classes(item) & {"annotation", "standfirst"}
+    ]
+    values = [_text(item) for item in paragraphs]
+    body_removals: set[ET.Element] = set()
+    annotation_removals: set[ET.Element] = set()
+
+    for annotation in annotations:
+        target = _pullquote_normalize(_text(annotation))
+        if not target:
+            continue
+        match: tuple[int, int] | None = None
+        for start in range(len(paragraphs)):
+            includes_candidate = False
+            for end in range(start, min(len(paragraphs), start + 10)):
+                includes_candidate = includes_candidate or paragraphs[end] in candidates
+                combined = _pullquote_normalize(" ".join(values[start:end + 1]))
+                if combined == target and includes_candidate:
+                    match = (start, end)
+                    break
+                if len(combined) > len(target):
+                    break
+            if match:
+                break
+        if match:
+            annotation_removals.add(annotation)
+            body_removals.update(paragraphs[match[0]:match[1] + 1])
+
+    for index, candidate in enumerate(paragraphs):
+        if candidate not in candidates or candidate in body_removals:
+            continue
+        following = values[index + 1] if index + 1 < len(values) else ""
+        if following and _pullquote_looks_like_attribution(following):
+            # Without an exact annotation/body relationship, keep the pair.
+            continue
+        body_removals.add(candidate)
+
+    removed = 0
+    for item in annotation_removals | body_removals:
+        parent = parents.get(item)
+        if parent is not None and item in list(parent):
+            parent.remove(item)
+            removed += 1
+    return removed
 
 
 def _page_number(path: str) -> int:
@@ -465,11 +633,11 @@ def _add_stylesheet_link(root: ET.Element, document: str, stylesheet: str) -> No
     })
 
 
-def _decorate_clean_markup(root: ET.Element) -> None:
+def _decorate_clean_markup(root: ET.Element) -> int:
     """Add stable semantic hooks to an EPUB previously cleaned by Pressko."""
     body = next((item for item in root.iter() if _local_name(item.tag) == "body"), None)
     if body is None:
-        return
+        return 0
     if any(_local_name(item.tag) == "ol" for item in body):
         body.set("class", "toc")
     for article in list(body):
@@ -504,6 +672,11 @@ def _decorate_clean_markup(root: ET.Element) -> None:
     _mark_subtitle_only_headers(root)
     _normalize_byline_case(root)
     _normalize_media_markup(root)
+    return sum(
+        _remove_redundant_pullquotes(article)
+        for article in list(body)
+        if "article" in _classes(article)
+    )
 
 
 def _apply_reader_style(
@@ -512,7 +685,7 @@ def _apply_reader_style(
     *,
     decorate: bool = False,
     documents: set[str] | None = None,
-) -> None:
+) -> int:
     stylesheet = _stylesheet_path(opf_path)
     files[stylesheet] = READER_CSS
     opf_root = _parse_xml(files[opf_path], opf_path)
@@ -538,14 +711,16 @@ def _apply_reader_style(
     files[opf_path] = _serialize(opf_root, OPF_NS)
 
     styled_documents = documents if documents is not None else set(files)
+    pullquote_elements_removed = 0
     for document in sorted(
         name for name in styled_documents if name.lower().endswith((".xhtml", ".html"))
     ):
         root = _parse_xml(files[document], document)
         if decorate:
-            _decorate_clean_markup(root)
+            pullquote_elements_removed += _decorate_clean_markup(root)
         _add_stylesheet_link(root, document, stylesheet)
         files[document] = _serialize(root, XHTML_NS)
+    return pullquote_elements_removed
 
 
 def _nav_label(point: ET.Element) -> str:
@@ -660,13 +835,18 @@ def _build_ncx(old_data: bytes, nodes: list[NavigationNode], ncx_path: str) -> b
     return _serialize(root, NCX_NS)
 
 
-def _clean_document(document: str, root: ET.Element, keep: set[str]) -> tuple[bytes | None, list[Article]]:
+def _clean_document(
+    document: str,
+    root: ET.Element,
+    keep: set[str],
+) -> tuple[bytes | None, list[Article], int]:
     body = next((item for item in root.iter() if _local_name(item.tag) == "body"), None)
     head = next((item for item in root.iter() if _local_name(item.tag) == "head"), None)
     if body is None or head is None:
-        return None, []
+        return None, [], 0
 
     retained: list[Article] = []
+    pullquote_elements_removed = 0
     for element in list(root.iter()):
         if not _has_class(element, "art-cnt"):
             continue
@@ -677,6 +857,7 @@ def _clean_document(document: str, root: ET.Element, keep: set[str]) -> tuple[by
         title = _article_title(element)
         _remove_matching(element, {"legal-header", "art-header", "art-divider", "art-thumb-img"})
         _semantic_article_markup(element)
+        pullquote_elements_removed += _remove_redundant_pullquotes(element)
         retained.append(Article(
             document=document, element=element, article_id=article_id,
             title=title, page_number=_page_number(document),
@@ -684,7 +865,7 @@ def _clean_document(document: str, root: ET.Element, keep: set[str]) -> tuple[by
         ))
 
     if not retained:
-        return None, []
+        return None, [], 0
     for child in list(body):
         body.remove(child)
     for article in retained:
@@ -692,7 +873,7 @@ def _clean_document(document: str, root: ET.Element, keep: set[str]) -> tuple[by
     for child in list(head):
         if _local_name(child.tag) == "link":
             head.remove(child)
-    return _serialize(root, XHTML_NS), retained
+    return _serialize(root, XHTML_NS), retained, pullquote_elements_removed
 
 
 def _update_opf(
@@ -786,8 +967,10 @@ def clean_pressreader_epub(path: Path) -> CleanupStats:
 
     cleaned_documents: dict[str, bytes] = {}
     kept_articles: list[Article] = []
+    pullquote_elements_removed = 0
     for document in page_documents:
-        cleaned, retained = _clean_document(document, parsed[document], keep_keys)
+        cleaned, retained, removed = _clean_document(document, parsed[document], keep_keys)
+        pullquote_elements_removed += removed
         if cleaned:
             cleaned_documents[document] = cleaned
             kept_articles.extend(retained)
@@ -845,12 +1028,14 @@ def clean_pressreader_epub(path: Path) -> CleanupStats:
         articles_found=len(articles), articles_kept=len(kept_articles),
         duplicates_removed=len(articles) - len(kept_articles),
         page_documents_removed=len(page_documents) - len(cleaned_documents),
-        assets_removed=removed_assets, original_bytes=original_bytes,
+        assets_removed=removed_assets,
+        pullquote_elements_removed=pullquote_elements_removed,
+        original_bytes=original_bytes,
         cleaned_bytes=path.stat().st_size,
     )
 
 
-def style_pressreader_epub(path: Path) -> None:
+def style_pressreader_epub(path: Path) -> int:
     """Apply the reader stylesheet to an existing cleaned EPUB atomically."""
     path = Path(path)
     with zipfile.ZipFile(path) as archive:
@@ -865,7 +1050,7 @@ def style_pressreader_epub(path: Path) -> None:
     )
     if "NewspaperDirect" not in publishers:
         raise ValueError("Not a PressReader/NewspaperDirect EPUB")
-    _apply_reader_style(files, opf_path, decorate=True)
+    pullquote_elements_removed = _apply_reader_style(files, opf_path, decorate=True)
 
     descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     os.close(descriptor)
@@ -882,6 +1067,7 @@ def style_pressreader_epub(path: Path) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    return pullquote_elements_removed
 
 
 def reader_style_is_current(path: Path) -> bool:
@@ -909,8 +1095,8 @@ def main() -> int:
     args = parser.parse_args()
     for epub in args.epub:
         if args.style_only:
-            style_pressreader_epub(epub)
-            print(epub, "styled")
+            removed = style_pressreader_epub(epub)
+            print(epub, "styled", f"({removed} redundant callout elements removed)")
         else:
             print(epub, clean_pressreader_epub(epub))
     return 0
