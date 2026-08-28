@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
-from epub_cleaner import clean_pressreader_epub
+from epub_cleaner import clean_pressreader_epub, reader_style_is_current, style_pressreader_epub
 
 LOG = logging.getLogger("pressreader_sync.worker")
 PRESSREADER_HOME = "https://www.pressreader.com/"
@@ -29,6 +29,7 @@ DEFAULT_CATALOG_URL = "https://www.pressreader.com/catalog"
 MONTHS = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
 ISSUE_DATE_RE = re.compile(rf"\b(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})\b", re.IGNORECASE)
 STOP = False
+DEFAULT_RETRY_DELAYS = (600, 1800, 3600, 10800)
 
 
 def stop(_signum: int, _frame: Any) -> None:
@@ -48,14 +49,35 @@ def normalized_url(value: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
 
 
-def parse_issue_date(text: str) -> str:
+def parse_issue_date(text: str) -> str | None:
     match = ISSUE_DATE_RE.search(text or "")
     if not match:
-        return datetime.now(timezone.utc).date().isoformat()
+        return None
     try:
         return datetime.strptime(match.group(1).title(), "%d %b %Y").date().isoformat()
     except ValueError:
-        return datetime.now(timezone.utc).date().isoformat()
+        return None
+
+
+def retry_delay_seconds(failure_count: int, delays: tuple[int, ...] = DEFAULT_RETRY_DELAYS) -> int:
+    """Return the retry delay, keeping the final delay for later failures."""
+    if not delays:
+        return 10800
+    index = min(max(1, failure_count), len(delays)) - 1
+    return max(1, delays[index])
+
+
+def export_devices() -> list[str]:
+    configured = os.environ.get("PRESSREADER_SYNC_EXPORT_DEVICES", "").strip()
+    if not configured:
+        preferred = os.environ.get("PRESSREADER_SYNC_EXPORT_DEVICE", "Nook").strip() or "Nook"
+        configured = ",".join((preferred, "Kobo", "Sony"))
+    devices: list[str] = []
+    for value in configured.split(","):
+        value = value.strip()
+        if value and value.casefold() not in {item.casefold() for item in devices}:
+            devices.append(value)
+    return devices or ["Nook"]
 
 
 def is_epub(path: Path) -> bool:
@@ -79,18 +101,25 @@ class RunStatus:
     finished_at: str = ""
     next_run_at: str = ""
     discovered: int = 0
+    attempted: int = 0
     exported: int = 0
     skipped: int = 0
+    deferred: int = 0
     errors: list[str] = field(default_factory=list)
+    retries: list[dict[str, Any]] = field(default_factory=list)
 
 
 class StateStore:
     def __init__(self, directory: Path):
         self.directory = directory
         self.ledger_path = directory / "exports.json"
+        self.retry_path = directory / "retries.json"
         self.status_path = directory / "worker-status.json"
         directory.mkdir(parents=True, exist_ok=True)
         self.ledger = self._load(self.ledger_path, {})
+        self.retries = self._load(self.retry_path, {})
+        if not isinstance(self.retries, dict):
+            self.retries = {}
 
     @staticmethod
     def _load(path: Path, fallback: Any) -> Any:
@@ -116,6 +145,81 @@ class StateStore:
             "exported_at": datetime.now(timezone.utc).isoformat(),
         }
         self._atomic_json(self.ledger_path, self.ledger)
+        self.clear_failure(publication.url)
+
+    def retry_due(self, url: str, now: float | None = None) -> bool:
+        retry = self.retries.get(normalized_url(url))
+        if not isinstance(retry, dict):
+            return False
+        now = time.time() if now is None else now
+        return float(retry.get("next_retry_timestamp", 0)) <= now
+
+    def record_failure(
+        self,
+        publication: PublicationLink,
+        error: str,
+        issue_date: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if now is None else now
+        key = normalized_url(publication.url)
+        previous = self.retries.get(key, {})
+        same_issue = (
+            isinstance(previous, dict)
+            and (not issue_date or previous.get("issue_date") in ("", issue_date))
+        )
+        failures = int(previous.get("failures", 0)) + 1 if same_issue else 1
+        delay = retry_delay_seconds(failures)
+        next_retry = now + delay
+        entry = {
+            "title": publication.title,
+            "issue_date": issue_date,
+            "failures": failures,
+            "last_error": error,
+            "failed_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+            "next_retry_at": datetime.fromtimestamp(next_retry, timezone.utc).isoformat(),
+            "next_retry_timestamp": next_retry,
+        }
+        self.retries[key] = entry
+        self._atomic_json(self.retry_path, self.retries)
+        return entry
+
+    def clear_failure(self, url: str) -> None:
+        if self.retries.pop(normalized_url(url), None) is not None:
+            self._atomic_json(self.retry_path, self.retries)
+
+    def next_retry_timestamp(self) -> float | None:
+        timestamps = [
+            float(item.get("next_retry_timestamp", 0))
+            for item in self.retries.values()
+            if isinstance(item, dict) and item.get("next_retry_timestamp")
+        ]
+        return min(timestamps) if timestamps else None
+
+    def defer_overdue_retries(self, now: float | None = None, delay: int = 600) -> None:
+        """Prevent a missing publication from causing a tight retry loop."""
+        now = time.time() if now is None else now
+        changed = False
+        for item in self.retries.values():
+            if not isinstance(item, dict) or float(item.get("next_retry_timestamp", 0)) > now:
+                continue
+            next_retry = now + delay
+            item["next_retry_timestamp"] = next_retry
+            item["next_retry_at"] = datetime.fromtimestamp(next_retry, timezone.utc).isoformat()
+            changed = True
+        if changed:
+            self._atomic_json(self.retry_path, self.retries)
+
+    def public_retries(self) -> list[dict[str, Any]]:
+        retries = []
+        for item in self.retries.values():
+            if not isinstance(item, dict):
+                continue
+            retries.append({
+                key: item.get(key)
+                for key in ("title", "issue_date", "failures", "last_error", "failed_at", "next_retry_at")
+            })
+        return sorted(retries, key=lambda item: str(item.get("next_retry_at", "")))
 
     def write_status(self, status: RunStatus) -> None:
         self._atomic_json(self.status_path, asdict(status))
@@ -127,6 +231,7 @@ class PressReaderAutomation:
         self.library = library
         self.state = state
         self.diagnostics = diagnostics
+        self.current_issue_date = ""
         self.page.set_default_timeout(15_000)
 
     def save_diagnostic(self, name: str) -> None:
@@ -152,23 +257,52 @@ class PressReaderAutomation:
                 raise RuntimeError("PressReader login has expired; run the login profile again") from err
             raise RuntimeError("Could not find My Publications; see the diagnostics folder") from err
 
-        raw_links = grid.locator('a[data-testid^="publication-"][href]').evaluate_all("""links =>
-            links.map(a => ({
-                url: a.href,
-                title: (a.querySelector('.page-source')?.innerText ||
-                        [...a.querySelectorAll('.sr-only')].map(x => x.innerText).find(x => x && !/^(Magazine|Newspaper)$/i.test(x)) ||
-                        a.querySelector('img')?.alt || a.getAttribute('title') || '').trim()
-            }))""")
         excluded = ("/catalog", "/search", "/account", "/help", "/settings")
         found: dict[str, PublicationLink] = {}
-        for item in raw_links:
-            url = urljoin(PRESSREADER_HOME, str(item.get("url", "")))
-            parsed = urlsplit(url)
-            if not parsed.netloc.endswith("pressreader.com") or any(parsed.path.rstrip("/") == value for value in excluded):
-                continue
-            key = normalized_url(url)
-            title = safe_component(str(item.get("title", "")).splitlines()[0], parsed.path.rsplit("/", 1)[-1])
-            found[key] = PublicationLink(title=title, url=url)
+
+        # The shelf is a horizontally virtualized React grid: only the cards in
+        # and near the viewport exist in the DOM.  Read each viewport, then use
+        # the shelf's own paddle to make the remaining saved titles mount.
+        for _ in range(100):
+            raw_links = grid.locator('a[data-testid^="publication-"][href]').evaluate_all("""links =>
+                links.map(a => ({
+                    url: a.href,
+                    title: (a.querySelector('.page-source')?.innerText ||
+                            [...a.querySelectorAll('.sr-only')].map(x => x.innerText).find(x => x && !/^(Magazine|Newspaper)$/i.test(x)) ||
+                            a.querySelector('img')?.alt || a.getAttribute('title') || '').trim()
+                }))""")
+            for item in raw_links:
+                url = urljoin(PRESSREADER_HOME, str(item.get("url", "")))
+                parsed = urlsplit(url)
+                if not parsed.netloc.endswith("pressreader.com") or any(
+                    parsed.path.rstrip("/") == value for value in excluded
+                ):
+                    continue
+                key = normalized_url(url)
+                title = safe_component(
+                    str(item.get("title", "")).splitlines()[0],
+                    parsed.path.rsplit("/", 1)[-1],
+                )
+                found[key] = PublicationLink(title=title, url=url)
+
+            metrics = grid.evaluate("""el => ({
+                left: el.scrollLeft,
+                viewport: el.clientWidth,
+                width: el.scrollWidth
+            })""")
+            if metrics["left"] + metrics["viewport"] >= metrics["width"] - 2:
+                break
+            previous_left = metrics["left"]
+            grid.evaluate("""el => {
+                el.scrollLeft = Math.min(
+                    el.scrollWidth,
+                    el.scrollLeft + Math.max(300, el.clientWidth * 0.8)
+                );
+                el.dispatchEvent(new Event('scroll', {bubbles: true}));
+            }""")
+            self.page.wait_for_timeout(500)
+            if grid.evaluate("el => el.scrollLeft") <= previous_left + 1:
+                break
         if not found:
             self.save_diagnostic("my-publications-empty")
             raise RuntimeError("My Publications was found but no publication links could be identified")
@@ -264,23 +398,28 @@ class PressReaderAutomation:
         self.save_diagnostic("read-button-not-found")
         raise RuntimeError("Could not enter the latest issue reader")
 
-    def export_latest(self, publication: PublicationLink) -> str:
-        LOG.info("Checking %s", publication.title)
+    def _open_latest_export_menu(self, publication: PublicationLink) -> str:
         self.page.goto(publication.url, wait_until="domcontentloaded", timeout=60_000)
         self.page.wait_for_timeout(5_000)
         self._enter_reader(publication.url)
         self._open_publication_menu()
         menu_text = self.page.locator("body").inner_text()
         issue_date = parse_issue_date(menu_text)
-        if self.state.already_exported(publication.url, issue_date):
-            LOG.info("Already have %s dated %s", publication.title, issue_date)
-            self.page.keyboard.press("Escape")
-            return "skipped"
+        if not issue_date:
+            self.save_diagnostic("issue-date-not-found-" + publication.title)
+            raise RuntimeError(
+                f"Could not verify the issue date for {publication.title}; refusing to guess"
+            )
+        self.current_issue_date = issue_date
+        return issue_date
 
+    def _download_export(self, publication: PublicationLink, device_name: str) -> Path:
         self.page.get_by_text(re.compile(r"Export\s+to\s+eReader", re.I)).click()
-        export_device = os.environ.get("PRESSREADER_SYNC_EXPORT_DEVICE", "Nook")
-        device = self.page.get_by_text(export_device, exact=True)
-        device.wait_for(state="visible")
+        device = self.page.get_by_text(device_name, exact=True)
+        try:
+            device.wait_for(state="visible", timeout=5_000)
+        except PlaywrightTimeoutError as err:
+            raise RuntimeError(f"{device_name} is not offered") from err
         device.click()
         done = self.page.get_by_text("Done", exact=True)
         downloads: list[Any] = []
@@ -295,19 +434,57 @@ class PressReaderAutomation:
             pressreader_error = self.page.get_by_text(re.compile(r"Something\s+went\s+wrong", re.I))
             while not downloads:
                 if self._visible(pressreader_error):
-                    raise RuntimeError(f"PressReader reported that export is unavailable for {publication.title}")
+                    raise RuntimeError(f"PressReader rejected the {device_name} export")
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(f"PressReader did not deliver the export for {publication.title} within 180 seconds")
+                    raise RuntimeError(f"PressReader did not deliver the {device_name} export within 180 seconds")
                 self.page.wait_for_timeout(500)
         finally:
             self.page.remove_listener("download", capture_download)
         download = downloads[0]
         suggested = download.suggested_filename
-        temporary = self.state.directory / ("incoming-" + safe_component(suggested, "issue.epub"))
+        temporary = self.state.directory / (
+            "incoming-" + safe_component(device_name, "device") + "-" + safe_component(suggested, "issue.epub")
+        )
         download.save_as(str(temporary))
         if not is_epub(temporary):
             temporary.unlink(missing_ok=True)
-            raise RuntimeError(f"{export_device} export for {publication.title} was not a standard EPUB")
+            raise RuntimeError(f"{device_name} export was not a standard EPUB")
+        return temporary
+
+    def export_latest(self, publication: PublicationLink) -> str:
+        LOG.info("Checking %s", publication.title)
+        self.current_issue_date = ""
+        issue_date = self._open_latest_export_menu(publication)
+        if self.state.already_exported(publication.url, issue_date):
+            record = self.state.ledger.get(normalized_url(publication.url), {})
+            exported_file = Path(str(record.get("file", "")))
+            if exported_file.is_file() and not reader_style_is_current(exported_file):
+                style_pressreader_epub(exported_file)
+                LOG.info("Updated reader styling for %s dated %s", publication.title, issue_date)
+            LOG.info("Already have %s dated %s", publication.title, issue_date)
+            self.page.keyboard.press("Escape")
+            self.state.clear_failure(publication.url)
+            return "skipped"
+
+        temporary: Path | None = None
+        failures: list[str] = []
+        devices = export_devices()
+        for index, device_name in enumerate(devices):
+            if index:
+                retry_date = self._open_latest_export_menu(publication)
+                if retry_date != issue_date:
+                    raise RuntimeError(
+                        f"Issue changed from {issue_date} to {retry_date} while trying export formats"
+                    )
+            try:
+                temporary = self._download_export(publication, device_name)
+                LOG.info("Downloaded %s using the %s export", publication.title, device_name)
+                break
+            except Exception as err:
+                failures.append(f"{device_name}: {err}")
+                LOG.warning("%s export failed for %s: %s", device_name, publication.title, err)
+        if temporary is None:
+            raise RuntimeError("all configured exports failed (" + "; ".join(failures) + ")")
 
         cleanup = clean_pressreader_epub(temporary)
         LOG.info(
@@ -385,6 +562,7 @@ def run_once(
     proxy_server: str = "",
     only_title: str = "",
     exclude_title: str = "",
+    retry_only: bool = False,
 ) -> RunStatus:
     state = StateStore(state_dir)
     status = RunStatus(state="running", started_at=datetime.now(timezone.utc).isoformat())
@@ -395,6 +573,7 @@ def run_once(
             page = context.pages[0] if context.pages else context.new_page()
             automation = PressReaderAutomation(page, library, state, diagnostics)
             publications = automation.discover_my_publications(catalog_url)
+            status.discovered = len(publications)
             if only_title:
                 publications = [
                     publication
@@ -407,9 +586,13 @@ def run_once(
                     for publication in publications
                     if publication.title.casefold() != exclude_title.casefold()
                 ]
+            if retry_only:
+                before = len(publications)
+                publications = [publication for publication in publications if state.retry_due(publication.url)]
+                status.deferred = before - len(publications)
             if limit > 0:
                 publications = publications[:limit]
-            status.discovered = len(publications)
+            status.attempted = len(publications)
             for publication in publications:
                 if STOP:
                     break
@@ -421,7 +604,19 @@ def run_once(
                         status.skipped += 1
                 except Exception as err:
                     LOG.exception("Failed to export %s", publication.title)
-                    status.errors.append(f"{publication.title}: {err}")
+                    message = f"{publication.title}: {err}"
+                    status.errors.append(message)
+                    retry = state.record_failure(
+                        publication,
+                        str(err),
+                        issue_date=automation.current_issue_date,
+                    )
+                    LOG.info(
+                        "Will retry %s at %s after failure %d",
+                        publication.title,
+                        retry["next_retry_at"],
+                        retry["failures"],
+                    )
                     automation.save_diagnostic("export-failed-" + publication.title)
         except Exception as err:
             LOG.exception("PressReader synchronization failed")
@@ -429,7 +624,10 @@ def run_once(
         finally:
             context.close()
     status.finished_at = datetime.now(timezone.utc).isoformat()
-    status.state = "error" if status.errors else "ok"
+    status.state = "partial" if status.errors and (status.exported or status.skipped) else (
+        "error" if status.errors else "ok"
+    )
+    status.retries = StateStore(state_dir).public_retries()
     state.write_status(status)
     return status
 
@@ -441,11 +639,15 @@ def run_cycle(
     diagnostics: Path,
     catalog_url: str,
     limit: int = 0,
+    retry_only: bool = False,
 ) -> RunStatus:
     special_proxy = os.environ.get("PRESSREADER_SYNC_SPECIAL_PROXY", "").strip()
     special_title = os.environ.get("PRESSREADER_SYNC_SPECIAL_TITLE", "").strip()
     if not special_proxy or not special_title:
-        return run_once(profile, library, state_dir, diagnostics, catalog_url, limit)
+        return run_once(
+            profile, library, state_dir, diagnostics, catalog_url, limit,
+            retry_only=retry_only,
+        )
 
     direct = run_once(
         profile,
@@ -455,6 +657,7 @@ def run_cycle(
         catalog_url,
         limit,
         exclude_title=special_title,
+        retry_only=retry_only,
     )
     special = run_once(
         profile,
@@ -465,15 +668,21 @@ def run_cycle(
         limit,
         proxy_server=special_proxy,
         only_title=special_title,
+        retry_only=retry_only,
     )
     combined = RunStatus(
-        state="error" if direct.errors or special.errors else "ok",
+        state="partial" if (direct.errors or special.errors) and (
+            direct.exported or direct.skipped or special.exported or special.skipped
+        ) else ("error" if direct.errors or special.errors else "ok"),
         started_at=direct.started_at,
         finished_at=special.finished_at,
         discovered=direct.discovered + special.discovered,
+        attempted=direct.attempted + special.attempted,
         exported=direct.exported + special.exported,
         skipped=direct.skipped + special.skipped,
+        deferred=direct.deferred + special.deferred,
         errors=direct.errors + special.errors,
+        retries=StateStore(state_dir).public_retries(),
     )
     StateStore(state_dir).write_status(combined)
     return combined
@@ -510,12 +719,24 @@ def main(argv: list[str] | None = None) -> int:
         status = run_cycle(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
         return 1 if status.errors else 0
     interval = max(300, args.interval)
+    next_regular_run = 0.0
     while not STOP:
-        started = time.monotonic()
-        status = run_cycle(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
-        remaining = max(0, interval - int(time.monotonic() - started))
-        status.next_run_at = datetime.fromtimestamp(time.time() + remaining, timezone.utc).isoformat()
-        StateStore(args.state).write_status(status)
+        cycle_started = time.time()
+        retry_only = cycle_started < next_regular_run
+        status = run_cycle(
+            args.profile, args.library, args.state, args.diagnostics,
+            args.catalog_url, args.limit, retry_only=retry_only,
+        )
+        if not retry_only:
+            next_regular_run = cycle_started + interval
+        state = StateStore(args.state)
+        state.defer_overdue_retries()
+        retry_at = state.next_retry_timestamp()
+        next_run = min(next_regular_run, retry_at) if retry_at else next_regular_run
+        remaining = max(1, int(next_run - time.time()))
+        status.retries = state.public_retries()
+        status.next_run_at = datetime.fromtimestamp(next_run, timezone.utc).isoformat()
+        state.write_status(status)
         LOG.info("Next check in %d seconds", remaining)
         for _ in range(remaining):
             if STOP:

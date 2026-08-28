@@ -61,11 +61,15 @@ docker compose up -d --build bridge worker
 docker compose logs -f worker
 ```
 
-The default interval is six hours. A run discovers **My Publications**, opens
+The default regular interval is six hours. A run discovers **My Publications**, opens
 the latest issue of each saved title, uses **Export to eReader → Nook**, checks
 and cleans the EPUB, and stores it under
 `deploy/data/library/<publication>/`. Previously exported issue dates are
-skipped.
+skipped. If an export fails, the worker keeps retrying that publication after
+10 minutes, 30 minutes, 1 hour, and then every 3 hours until it succeeds. A new
+issue resets the retry delay. By default Nook is preferred, with Kobo and Sony
+tried as official EPUB fallbacks. Configure the order with
+`PRESSREADER_SYNC_EXPORT_DEVICES`.
 
 Run an immediate check with:
 

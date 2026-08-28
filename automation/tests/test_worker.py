@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -30,6 +31,48 @@ class WorkerHelpersTest(unittest.TestCase):
 
     def test_issue_date(self):
         self.assertEqual(self.worker.parse_issue_date("Issue Date 18 Jul 2026"), "2026-07-18")
+        self.assertIsNone(self.worker.parse_issue_date("Issue date unavailable"))
+
+    def test_retry_delays_continue_every_three_hours(self):
+        self.assertEqual(
+            [self.worker.retry_delay_seconds(value) for value in range(1, 7)],
+            [600, 1800, 3600, 10800, 10800, 10800],
+        )
+
+    def test_failures_are_retried_and_reset_for_a_new_issue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = self.worker.StateStore(Path(temp))
+            publication = self.worker.PublicationLink("Daily", "https://pressreader.com/daily")
+            first = state.record_failure(publication, "temporary", "2026-07-28", now=1000)
+            second = state.record_failure(publication, "temporary", "2026-07-28", now=2000)
+            new_issue = state.record_failure(publication, "temporary", "2026-07-29", now=3000)
+
+            self.assertEqual(first["next_retry_timestamp"], 1600)
+            self.assertEqual(second["next_retry_timestamp"], 3800)
+            self.assertEqual(new_issue["failures"], 1)
+            self.assertEqual(new_issue["next_retry_timestamp"], 3600)
+            self.assertTrue(state.retry_due(publication.url, now=3600))
+            self.assertEqual(json.loads((Path(temp) / "retries.json").read_text())[
+                self.worker.normalized_url(publication.url)
+            ]["issue_date"], "2026-07-29")
+
+            state.clear_failure(publication.url)
+            self.assertFalse(state.retry_due(publication.url, now=9999))
+
+    def test_export_devices_are_ordered_and_deduplicated(self):
+        with mock.patch.dict(
+            self.worker.os.environ,
+            {"PRESSREADER_SYNC_EXPORT_DEVICES": "Nook, Kobo, nook, Sony"},
+        ):
+            self.assertEqual(self.worker.export_devices(), ["Nook", "Kobo", "Sony"])
+
+    def test_legacy_preferred_device_keeps_fallbacks(self):
+        with mock.patch.dict(
+            self.worker.os.environ,
+            {"PRESSREADER_SYNC_EXPORT_DEVICE": "Kobo"},
+            clear=True,
+        ):
+            self.assertEqual(self.worker.export_devices(), ["Kobo", "Sony"])
 
     def test_epub_validation(self):
         with tempfile.TemporaryDirectory() as temp:

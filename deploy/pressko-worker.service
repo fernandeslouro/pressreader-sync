@@ -9,7 +9,7 @@ User=primity
 WorkingDirectory=/home/primity/pressko-test
 Environment=LD_LIBRARY_PATH=/home/primity/pressko-test/runtime/sysroot/usr/lib/x86_64-linux-gnu
 Environment=PLAYWRIGHT_BROWSERS_PATH=/home/primity/pressko-test/runtime/playwright-browsers
-Environment=PRESSREADER_SYNC_EXPORT_DEVICE=Nook
+Environment=PRESSREADER_SYNC_EXPORT_DEVICES=Nook,Kobo,Sony
 Environment="PRESSREADER_SYNC_SPECIAL_TITLE=The Economist (EU)"
 Environment=PRESSREADER_SYNC_SPECIAL_PROXY=http://10.203.0.2:8888
 ExecStart=/home/primity/pressko-test/.venv/bin/python -u /home/primity/pressko-test/automation/pressreader_worker.py run --interval 21600 --profile /home/primity/pressko-test/runtime/browser --library /home/primity/pressko-test/runtime/library --state /home/primity/pressko-test/runtime/state --diagnostics /home/primity/pressko-test/runtime/state/diagnostics
