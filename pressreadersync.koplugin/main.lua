@@ -50,9 +50,6 @@ function PressReaderSync:onDispatcherRegisterActions()
     Dispatcher:registerAction("pressreader_sync_browse", {
         category = "none", event = "PressReaderSyncBrowse", title = _("PressReader Sync: browse publications"), general = true,
     })
-    Dispatcher:registerAction("pressreader_sync_latest", {
-        category = "none", event = "PressReaderSyncLatest", title = _("PressReader Sync: read latest"), general = true,
-    })
     Dispatcher:registerAction("pressreader_sync_download_all_latest", {
         category = "none", event = "PressReaderSyncDownloadAllLatest",
         title = _("PressReader Sync: download all latest editions"), general = true,
@@ -64,16 +61,6 @@ function PressReaderSync:addToMainMenu(menu_items)
         text = _("PressReader Sync"),
         sorting_hint = "search",
         sub_item_table = {
-            {
-                text_func = function()
-                    local title = self.settings:readSetting("favorite_title")
-                    return title and T(_("Read latest: %1"), title) or _("Read latest")
-                end,
-                enabled_func = function()
-                    return self.settings:readSetting("favorite_id") ~= nil
-                end,
-                callback = function() self:onPressReaderSyncLatest() end,
-            },
             {
                 text = _("Browse publications"),
                 callback = function() self:onPressReaderSyncBrowse() end,
@@ -98,7 +85,7 @@ function PressReaderSync:addToMainMenu(menu_items)
                 text = _("About PressReader Sync"),
                 callback = function()
                     UIManager:show(InfoMessage:new{
-                        text = _([[PressReader Sync is an unofficial PressReader integration for KOReader. It downloads authorised PDF, EPUB, CBZ, and DJVU files from your own bridge and does not decrypt PressReader files or bypass licensing. Hold a publication to make it the one-tap favourite.]]),
+                        text = _([[PressReader Sync is an unofficial PressReader integration for KOReader. It downloads authorised PDF, EPUB, CBZ, and DJVU files from your own bridge and does not decrypt PressReader files or bypass licensing.]]),
                     })
                 end,
             },
@@ -160,36 +147,23 @@ function PressReaderSync:showPublications(publications)
         return
     end
     local items = {}
-    local favorite_id = self.settings:readSetting("favorite_id")
-    for publication_index, publication in ipairs(publications) do
+    for _, publication in ipairs(publications) do
         table.insert(items, {
             text = publication.title,
             mandatory = T(_("%1 · %2 editions"), publication.latest_date or "", publication.issue_count or 0),
-            bold = publication.id == favorite_id,
             publication = publication,
         })
     end
     local menu
     menu = Menu:new{
         title = _("PressReader Sync publications"),
-        subtitle = _("Tap to browse · hold to favourite"),
+        subtitle = _("Tap to browse editions"),
         item_table = items,
         is_popout = false,
         is_borderless = true,
         title_bar_fm_style = true,
         onMenuSelect = function(menu_widget, item)
             self:loadIssues(item.publication)
-        end,
-        onMenuHold = function(menu_widget, item)
-            self.settings:saveSetting("favorite_id", item.publication.id)
-            self.settings:saveSetting("favorite_title", item.publication.title)
-            self.updated = true
-            for row_index, row in ipairs(items) do row.bold = row.publication.id == item.publication.id end
-            menu:switchItemTable(nil, items, item.idx)
-            UIManager:show(InfoMessage:new{
-                text = T(_("%1 is now the Read latest favourite."), item.publication.title), timeout = 2,
-            })
-            return true
         end,
     }
     self.active_menu = menu
@@ -231,20 +205,6 @@ function PressReaderSync:showIssues(publication, issues)
     if self.active_menu then UIManager:close(self.active_menu) end
     self.active_menu = menu
     UIManager:show(menu)
-end
-
-function PressReaderSync:onPressReaderSyncLatest()
-    local favorite_id = self.settings:readSetting("favorite_id")
-    if not favorite_id then
-        self:onPressReaderSyncBrowse()
-        return
-    end
-    self:withNetwork(function()
-        local issue = self:showBusy(_("Finding latest edition…"), function()
-            return self:client():latest(favorite_id)
-        end)
-        if issue then self:downloadAndOpen(issue) end
-    end)
 end
 
 function PressReaderSync:onPressReaderSyncDownloadAllLatest()

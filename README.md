@@ -3,8 +3,8 @@
 PressReader Sync is a fast, e-ink-friendly PressReader delivery app for
 [KOReader](https://github.com/koreader/koreader). It has three small parts:
 
-1. `pressreadersync.koplugin` runs on the reader. It browses publications, remembers a
-   favourite, downloads an edition and opens it immediately.
+1. `pressreadersync.koplugin` runs on the reader. It browses publications,
+   downloads editions, and opens them immediately.
 2. `bridge/pressreader_sync_bridge.py` runs on a computer, NAS, or Android/Termux. It
    indexes publication files that you are authorised to use and serves them to
    the reader over the local network.
@@ -49,8 +49,7 @@ You can also run `make package` and extract
 
 In KOReader open **Search (magnifier) → PressReader Sync → Settings**, enter the bridge
 URL (for example `http://192.168.1.20:8787`) and the same token. Then use
-**Browse publications**. Hold a publication to make it the favourite; after
-that **Read latest** is the one-tap daily path.
+**Browse publications** to choose and download an edition.
 
 Use **Download all latest editions** to fetch the newest available edition of
 every publication in one batch. Editions already downloaded at the expected
