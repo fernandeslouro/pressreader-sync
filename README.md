@@ -52,6 +52,10 @@ URL (for example `http://192.168.1.20:8787`) and the same token. Then use
 **Browse publications**. Hold a publication to make it the favourite; after
 that **Read latest** is the one-tap daily path.
 
+Use **Download all latest editions** to fetch the newest available edition of
+every publication in one batch. Editions already downloaded at the expected
+file size are skipped, and the plugin reports any publication that failed.
+
 The bridge prints its usable LAN addresses at startup. Keep it on a trusted
 network, set a token, and allow TCP port 8787 through the host firewall if
 needed. HTTP is intentional for simple local networks; use a reverse proxy if

@@ -53,6 +53,10 @@ function PressReaderSync:onDispatcherRegisterActions()
     Dispatcher:registerAction("pressreader_sync_latest", {
         category = "none", event = "PressReaderSyncLatest", title = _("PressReader Sync: read latest"), general = true,
     })
+    Dispatcher:registerAction("pressreader_sync_download_all_latest", {
+        category = "none", event = "PressReaderSyncDownloadAllLatest",
+        title = _("PressReader Sync: download all latest editions"), general = true,
+    })
 end
 
 function PressReaderSync:addToMainMenu(menu_items)
@@ -73,6 +77,10 @@ function PressReaderSync:addToMainMenu(menu_items)
             {
                 text = _("Browse publications"),
                 callback = function() self:onPressReaderSyncBrowse() end,
+            },
+            {
+                text = _("Download all latest editions"),
+                callback = function() self:onPressReaderSyncDownloadAllLatest() end,
             },
             {
                 text = _("Downloaded editions"),
@@ -237,6 +245,73 @@ function PressReaderSync:onPressReaderSyncLatest()
         end)
         if issue then self:downloadAndOpen(issue) end
     end)
+end
+
+function PressReaderSync:onPressReaderSyncDownloadAllLatest()
+    self:withNetwork(function()
+        local publications = self:showBusy(_("Loading publications…"), function()
+            return self:client():publications()
+        end)
+        if not publications then return end
+        if #publications == 0 then
+            UIManager:show(InfoMessage:new{ text = _("No publications found. Add files to the bridge library and try again.") })
+            return
+        end
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Download the most recent edition of all %1 publications?"), #publications),
+            ok_text = _("Download all"),
+            ok_callback = function() self:downloadAllLatest(publications) end,
+        })
+    end)
+end
+
+function PressReaderSync:downloadAllLatest(publications)
+    local ok, mkdir_err = util.makePath(self:downloadDirectory())
+    if not ok then
+        self:showError(mkdir_err or _("Could not create the download folder"))
+        return
+    end
+
+    local result = self:showBusy(_("Downloading latest editions…"), function()
+        local client = self:client()
+        local summary = { downloaded = 0, skipped = 0, failed = 0, errors = {} }
+        for _, publication in ipairs(publications) do
+            local issue, latest_err = client:latest(publication.id)
+            if not issue then
+                summary.failed = summary.failed + 1
+                table.insert(summary.errors, T(_("%1: %2"), publication.title, tostring(latest_err or _("Unknown error"))))
+            else
+                local destination = self:destinationFor(issue)
+                local attributes = lfs.attributes(destination)
+                local expected_size = tonumber(issue.size_bytes)
+                local complete = attributes and attributes.mode == "file"
+                    and (not expected_size or attributes.size == expected_size)
+                if complete then
+                    summary.skipped = summary.skipped + 1
+                else
+                    local downloaded, download_err = client:download(issue, destination)
+                    if downloaded then
+                        summary.downloaded = summary.downloaded + 1
+                    else
+                        summary.failed = summary.failed + 1
+                        table.insert(summary.errors, T(_("%1: %2"), publication.title, tostring(download_err or _("Unknown error"))))
+                    end
+                end
+            end
+        end
+        return summary
+    end)
+    if not result then return end
+
+    local text = T(_("Latest editions: %1 downloaded, %2 already present, %3 failed."),
+        result.downloaded, result.skipped, result.failed)
+    if #result.errors > 0 then
+        text = text .. "\n\n" .. table.concat(result.errors, "\n")
+    end
+    UIManager:show(InfoMessage:new{
+        text = text,
+        icon = result.failed > 0 and "notice-warning" or nil,
+    })
 end
 
 function PressReaderSync:destinationFor(issue)
