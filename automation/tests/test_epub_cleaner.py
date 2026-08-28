@@ -209,6 +209,7 @@ class EpubCleanerTest(unittest.TestCase):
                 css = archive.read("OEBPS/pressko.css").decode("utf-8")
                 self.assertIn("max-width: 100%", css)
                 self.assertNotIn("page-break-before: always", css)
+                self.assertIn("DocFragment { page-break-before: auto !important; }", css)
                 self.assertIn(".article + .article { margin-top: 1.4em; }", css)
                 self.assertIn(
                     ".article-header + * {\n  break-before: avoid;\n  page-break-before: avoid;\n}",

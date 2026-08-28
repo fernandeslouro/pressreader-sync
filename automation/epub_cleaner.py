@@ -43,8 +43,9 @@ BYLINE_PARTICLES = {
     "LOS": "los", "VAN": "van", "VON": "von", "Y": "y",
 }
 
-READER_CSS = b"""/* Pressko KOReader stylesheet v5; deliberately device-neutral. */
+READER_CSS = b"""/* Pressko KOReader stylesheet v6; deliberately device-neutral. */
 html { -webkit-text-size-adjust: 100%; }
+DocFragment { page-break-before: auto !important; }
 body {
   margin: 0;
   padding: 0;
