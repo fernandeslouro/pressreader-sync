@@ -1,11 +1,45 @@
 local http = require("socket.http")
-local ltn12 = require("ltn12")
 local rapidjson = require("rapidjson")
 local socket = require("socket")
 local socketutil = require("socketutil")
 
 local Client = {}
 Client.__index = Client
+
+local MAX_ATTEMPTS = 3
+local RETRY_DELAY_SECONDS = 0.5
+local RETRYABLE_HTTP_CODES = {
+    [408] = true, [425] = true, [429] = true,
+    [500] = true, [502] = true, [503] = true, [504] = true,
+}
+local RETRYABLE_ERROR_PARTS = {
+    "wantread", "wantwrite", "timeout", "closed", "connection reset",
+    "connection refused", "network is unreachable", "host is unreachable",
+    "temporary failure", "not known", "unexpected eof",
+}
+
+local function requestError(code, status)
+    return tostring(status or code or "network unreachable")
+end
+
+local function isRetryableFailure(code, status)
+    local numeric_code = tonumber(code)
+    if numeric_code then return RETRYABLE_HTTP_CODES[numeric_code] == true end
+
+    local message = requestError(code, status):lower()
+    for error_index, part in ipairs(RETRYABLE_ERROR_PARTS) do
+        if message:find(part, 1, true) then return true end
+    end
+    return false
+end
+
+local function finalRequestError(code, status, attempts)
+    local err = requestError(code, status)
+    if attempts > 1 then
+        return string.format("temporary network failure after %d attempts: %s", attempts, err)
+    end
+    return err
+end
 
 local function cleanBaseUrl(value)
     value = (value or ""):gsub("%s+$", ""):gsub("^%s+", "")
@@ -44,27 +78,46 @@ function Client:_headers()
     return headers
 end
 
+function Client:_performRequest(request, block_timeout, total_timeout)
+    socketutil:set_timeout(block_timeout, total_timeout)
+    local request_ok, result, code, _, status = pcall(http.request, request)
+    socketutil:reset_timeout()
+
+    if not request_ok then return nil, result end
+    if result == nil then return nil, code or status or "network unreachable" end
+    return code, status
+end
+
+function Client:_waitBeforeRetry(attempt)
+    socket.sleep(RETRY_DELAY_SECONDS * attempt)
+end
+
 function Client:get(path)
     if self.base_url == "" then
         return nil, "bridge URL is not configured"
     end
-    local sink = {}
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local code, _, status = socket.skip(1, http.request{
-        url = self:_url(path),
-        method = "GET",
-        headers = self:_headers(),
-        sink = socketutil.table_sink(sink),
-    })
-    socketutil:reset_timeout()
-    if code ~= 200 then
-        return nil, status or code or "network unreachable"
+
+    for attempt = 1, MAX_ATTEMPTS do
+        local sink = {}
+        local code, status = self:_performRequest({
+            url = self:_url(path),
+            method = "GET",
+            headers = self:_headers(),
+            sink = socketutil.table_sink(sink),
+        }, socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+
+        if code == 200 then
+            local payload, err = rapidjson.decode(table.concat(sink))
+            if not payload then
+                return nil, "invalid response: " .. tostring(err)
+            end
+            return payload
+        end
+        if attempt == MAX_ATTEMPTS or not isRetryableFailure(code, status) then
+            return nil, finalRequestError(code, status, attempt)
+        end
+        self:_waitBeforeRetry(attempt)
     end
-    local payload, err = rapidjson.decode(table.concat(sink))
-    if not payload then
-        return nil, "invalid response: " .. tostring(err)
-    end
-    return payload
 end
 
 function Client:publications()
@@ -90,26 +143,30 @@ function Client:download(issue, destination)
     if self.base_url == "" then
         return nil, "bridge URL is not configured"
     end
-    local handle, open_err = io.open(destination, "wb")
-    if not handle then
-        return nil, open_err
-    end
-    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-    local code, _, status = socket.skip(1, http.request{
-        url = self:_url(issue.download_url),
-        method = "GET",
-        headers = self:_headers(),
-        sink = socketutil.file_sink(handle),
-    })
-    socketutil:reset_timeout()
-    if code ~= 200 then
+
+    for attempt = 1, MAX_ATTEMPTS do
+        local handle, open_err = io.open(destination, "wb")
+        if not handle then return nil, open_err end
+
+        local code, status = self:_performRequest({
+            url = self:_url(issue.download_url),
+            method = "GET",
+            headers = self:_headers(),
+            sink = socketutil.file_sink(handle),
+        }, socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+        pcall(handle.close, handle)
+
+        if code == 200 then return true end
         os.remove(destination)
-        return nil, status or code or "network unreachable"
+        if attempt == MAX_ATTEMPTS or not isRetryableFailure(code, status) then
+            return nil, finalRequestError(code, status, attempt)
+        end
+        self:_waitBeforeRetry(attempt)
     end
-    return true
 end
 
 Client.cleanBaseUrl = cleanBaseUrl
 Client.urlEncode = urlEncode
+Client.isRetryableFailure = isRetryableFailure
 
 return Client
