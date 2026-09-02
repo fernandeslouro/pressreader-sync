@@ -55,6 +55,11 @@ Use **Download all latest editions** to fetch the newest available edition of
 every publication in one batch. Editions already downloaded at the expected
 file size are skipped, and the plugin reports any publication that failed.
 
+With the optional worker configured, use **Check PressReader for new editions
+now** to start its server-side check immediately instead of waiting for the next
+scheduled run. The check continues in the background; **Synchronization status**
+shows its progress and result.
+
 **Downloaded publications** groups editions by publication and shows the newest
 issue date. Publications and their editions are ordered by when they were
 downloaded, so future-dated issues do not stay pinned to the top.
@@ -87,10 +92,12 @@ Add `publication.json` inside a publication folder:
 --token TOKEN       bearer token (or PRESSREADER_SYNC_TOKEN)
 --token-file PATH   read bearer token from a private file
 --cache-seconds N   index cache lifetime (default 5)
+--worker-status PATH worker status JSON exposed by /v1/status
+--worker-trigger PATH file used to request an immediate worker run
 ```
 
-The bridge server itself is read-only. The optional worker writes completed
-exports into its library. The JSON API is documented in
+The bridge only writes the optional worker-trigger signal; it never changes library
+content. The optional worker writes completed exports into its library. The JSON API is documented in
 [`docs/protocol.md`](docs/protocol.md).
 
 For unattended PressReader exports on a Debian VPS, follow

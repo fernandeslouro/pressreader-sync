@@ -37,6 +37,20 @@ def stop(_signum: int, _frame: Any) -> None:
     STOP = True
 
 
+def consume_run_request(path: Path) -> bool:
+    """Atomically claim one or more coalesced manual run requests."""
+    claimed = path.with_name(path.name + ".claimed")
+    try:
+        path.replace(claimed)
+    except FileNotFoundError:
+        return False
+    try:
+        claimed.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
 def safe_component(value: str, fallback: str = "Publication") -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value).strip(" .")
@@ -701,6 +715,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--library", type=Path, default=Path("/library"))
     parser.add_argument("--state", type=Path, default=Path("/state"))
     parser.add_argument("--diagnostics", type=Path, default=Path("/state/diagnostics"))
+    parser.add_argument("--trigger", type=Path, default=Path("/state/run-requested"))
     parser.add_argument("--catalog-url", default=os.environ.get("PRESSREADER_CATALOG_URL", DEFAULT_CATALOG_URL))
     parser.add_argument(
         "--interval",
@@ -726,9 +741,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if status.errors else 0
     interval = max(300, args.interval)
     next_regular_run = 0.0
+    # The immediate startup cycle satisfies any request left behind by a restart.
+    consume_run_request(args.trigger)
+    manually_requested = False
     while not STOP:
         cycle_started = time.time()
-        retry_only = cycle_started < next_regular_run
+        retry_only = not manually_requested and cycle_started < next_regular_run
+        manually_requested = False
         status = run_cycle(
             args.profile, args.library, args.state, args.diagnostics,
             args.catalog_url, args.limit, retry_only=retry_only,
@@ -746,6 +765,10 @@ def main(argv: list[str] | None = None) -> int:
         LOG.info("Next check in %d seconds", remaining)
         for _ in range(remaining):
             if STOP:
+                break
+            if consume_run_request(args.trigger):
+                manually_requested = True
+                LOG.info("Immediate check requested")
                 break
             time.sleep(1)
     return 0

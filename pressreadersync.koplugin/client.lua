@@ -120,6 +120,36 @@ function Client:get(path)
     end
 end
 
+function Client:post(path)
+    if self.base_url == "" then
+        return nil, "bridge URL is not configured"
+    end
+
+    for attempt = 1, MAX_ATTEMPTS do
+        local sink = {}
+        local headers = self:_headers()
+        headers["Content-Length"] = "0"
+        local code, status = self:_performRequest({
+            url = self:_url(path),
+            method = "POST",
+            headers = headers,
+            sink = socketutil.table_sink(sink),
+        }, socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+
+        if code == 200 or code == 202 then
+            local payload, err = rapidjson.decode(table.concat(sink))
+            if not payload then
+                return nil, "invalid response: " .. tostring(err)
+            end
+            return payload
+        end
+        if attempt == MAX_ATTEMPTS or not isRetryableFailure(code, status) then
+            return nil, finalRequestError(code, status, attempt)
+        end
+        self:_waitBeforeRetry(attempt)
+    end
+end
+
 function Client:publications()
     local payload, err = self:get("/v1/publications")
     return payload and payload.publications, err
@@ -137,6 +167,10 @@ end
 
 function Client:status()
     return self:get("/v1/status")
+end
+
+function Client:triggerAutomation()
+    return self:post("/v1/automation/run")
 end
 
 function Client:download(issue, destination)

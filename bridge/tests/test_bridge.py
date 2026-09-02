@@ -31,9 +31,10 @@ class BridgeTest(unittest.TestCase):
         index = bridge.LibraryIndex(root, cache_seconds=60)
         index.rebuild()
         self.worker_status = root / "worker-status.json"
+        self.worker_trigger = root / "run-requested"
         self.worker_status.write_text('{"state":"ok","exported":1}', encoding="utf-8")
         self.server = bridge.PressReaderSyncServer(
-            ("127.0.0.1", 0), index, "secret", self.worker_status
+            ("127.0.0.1", 0), index, "secret", self.worker_status, self.worker_trigger
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -45,8 +46,8 @@ class BridgeTest(unittest.TestCase):
         self.thread.join(timeout=2)
         self.temp.cleanup()
 
-    def request(self, path, token="secret"):
-        req = urllib.request.Request(self.base + path)
+    def request(self, path, token="secret", method="GET"):
+        req = urllib.request.Request(self.base + path, method=method)
         if token is not None:
             req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req) as response:
@@ -77,6 +78,22 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(payload["name"], "PressReader Sync Bridge")
         self.assertEqual(payload["automation"]["state"], "ok")
         self.assertEqual(payload["automation"]["exported"], 1)
+
+    def test_automation_run_request_creates_trigger(self):
+        status, _, raw = self.request("/v1/automation/run", method="POST")
+        payload = json.loads(raw)
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["accepted"])
+        self.assertEqual(payload["state"], "queued")
+        self.assertTrue(self.worker_trigger.is_file())
+
+    def test_automation_run_request_is_coalesced_while_running(self):
+        self.worker_status.write_text('{"state":"running"}', encoding="utf-8")
+        status, _, raw = self.request("/v1/automation/run", method="POST")
+        payload = json.loads(raw)
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["accepted"])
+        self.assertFalse(self.worker_trigger.exists())
 
     def test_unknown_ids_are_404(self):
         with self.assertRaises(urllib.error.HTTPError) as context:

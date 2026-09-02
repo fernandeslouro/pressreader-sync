@@ -10,6 +10,7 @@ sent as `Authorization: Bearer <token>`.
 | `GET /v1/publications/{id}/issues` | Editions for one publication, newest first |
 | `GET /v1/latest?publication={id}` | Newest edition for one publication |
 | `GET /v1/files/{id}` | Edition bytes |
+| `POST /v1/automation/run` | Queue an immediate worker check |
 
 Publication IDs and issue IDs are opaque. Clients must not derive filesystem
 paths from them. The current response schema is intentionally small:
@@ -43,6 +44,11 @@ paths from them. The current response schema is intentionally small:
 
 Unknown endpoints and IDs return `404`; bad authentication returns `401`.
 Responses contain `Cache-Control: no-store`.
+
+`POST /v1/automation/run` returns `202` when a check is queued. Repeated requests
+are coalesced. If a check is already running, it returns `200` with
+`{"accepted":false,"state":"running"}`. The endpoint returns `501` when the
+bridge was started without `--worker-trigger`.
 
 When the optional worker status file is configured, `/v1/status` also contains
 an `automation` object with the last run state, timestamps, discovered/exported

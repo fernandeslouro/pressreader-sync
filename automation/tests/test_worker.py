@@ -29,6 +29,15 @@ class WorkerHelpersTest(unittest.TestCase):
         self.assertEqual(self.worker.safe_component('  The / Daily: News  '), "The _ Daily_ News")
         self.assertEqual(self.worker.safe_component("..."), "Publication")
 
+    def test_manual_run_requests_are_consumed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trigger = Path(temp) / "run-requested"
+            self.assertFalse(self.worker.consume_run_request(trigger))
+            trigger.touch()
+            self.assertTrue(self.worker.consume_run_request(trigger))
+            self.assertFalse(trigger.exists())
+            self.assertFalse(self.worker.consume_run_request(trigger))
+
     def test_issue_date(self):
         self.assertEqual(self.worker.parse_issue_date("Issue Date 18 Jul 2026"), "2026-07-18")
         self.assertIsNone(self.worker.parse_issue_date("Issue date unavailable"))
