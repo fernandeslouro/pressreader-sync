@@ -6,6 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).parents[1] / "pressreader_sync_bridge.py"
@@ -78,6 +79,16 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(payload["name"], "PressReader Sync Bridge")
         self.assertEqual(payload["automation"]["state"], "ok")
         self.assertEqual(payload["automation"]["exported"], 1)
+
+    def test_status_includes_age_of_last_completed_check(self):
+        finished = datetime.now(timezone.utc) - timedelta(seconds=90)
+        self.worker_status.write_text(
+            json.dumps({"state": "ok", "finished_at": finished.isoformat()}), encoding="utf-8"
+        )
+        _, _, raw = self.request("/v1/status")
+        age = json.loads(raw)["automation"]["finished_seconds_ago"]
+        self.assertGreaterEqual(age, 89)
+        self.assertLessEqual(age, 92)
 
     def test_automation_run_request_creates_trigger(self):
         status, _, raw = self.request("/v1/automation/run", method="POST")

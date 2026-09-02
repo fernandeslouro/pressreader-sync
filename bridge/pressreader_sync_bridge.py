@@ -218,7 +218,20 @@ class PressReaderSyncHandler(BaseHTTPRequestHandler):
             return None
         try:
             automation = json.loads(self.server.worker_status.read_text(encoding="utf-8"))
-            return automation if isinstance(automation, dict) else {"state": "unknown"}
+            if not isinstance(automation, dict):
+                return {"state": "unknown"}
+            finished_at = automation.get("finished_at")
+            if finished_at:
+                try:
+                    finished = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+                    if finished.tzinfo is None:
+                        finished = finished.replace(tzinfo=timezone.utc)
+                    automation["finished_seconds_ago"] = max(
+                        0, int((datetime.now(timezone.utc) - finished).total_seconds())
+                    )
+                except ValueError:
+                    pass
+            return automation
         except (OSError, UnicodeError, json.JSONDecodeError):
             return {"state": "unknown"}
 
