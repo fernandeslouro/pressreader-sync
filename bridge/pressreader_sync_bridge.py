@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -173,11 +174,13 @@ class PressReaderSyncServer(ThreadingHTTPServer):
         index: LibraryIndex,
         token: str,
         worker_status: Path | None = None,
+        worker_trigger: Path | None = None,
     ):
         super().__init__(address, PressReaderSyncHandler)
         self.index = index
         self.token = token
         self.worker_status = worker_status
+        self.worker_trigger = worker_trigger
 
 
 class PressReaderSyncHandler(BaseHTTPRequestHandler):
@@ -210,6 +213,15 @@ class PressReaderSyncHandler(BaseHTTPRequestHandler):
     def _error(self, status: HTTPStatus, message: str) -> None:
         self._json(status, {"error": message})
 
+    def _automation_status(self) -> dict[str, Any] | None:
+        if not self.server.worker_status:
+            return None
+        try:
+            automation = json.loads(self.server.worker_status.read_text(encoding="utf-8"))
+            return automation if isinstance(automation, dict) else {"state": "unknown"}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {"state": "unknown"}
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorised():
             self._error(HTTPStatus.UNAUTHORIZED, "invalid or missing token")
@@ -225,13 +237,9 @@ class PressReaderSyncHandler(BaseHTTPRequestHandler):
                 "publication_count": len(publications),
                 "issue_count": sum(item.issue_count for item in publications),
             }
-            if self.server.worker_status:
-                try:
-                    automation = json.loads(self.server.worker_status.read_text(encoding="utf-8"))
-                    if isinstance(automation, dict):
-                        payload["automation"] = automation
-                except (OSError, UnicodeError, json.JSONDecodeError):
-                    payload["automation"] = {"state": "unknown"}
+            automation = self._automation_status()
+            if automation is not None:
+                payload["automation"] = automation
             self._json(HTTPStatus.OK, payload)
             return
         if path == "/v1/publications":
@@ -279,6 +287,37 @@ class PressReaderSyncHandler(BaseHTTPRequestHandler):
             return
         self._error(HTTPStatus.NOT_FOUND, "endpoint not found")
 
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self._authorised():
+            self._error(HTTPStatus.UNAUTHORIZED, "invalid or missing token")
+            return
+
+        path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path != "/v1/automation/run":
+            self._error(HTTPStatus.NOT_FOUND, "endpoint not found")
+            return
+        if not self.server.worker_trigger:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "automation trigger is not configured")
+            return
+
+        automation = self._automation_status() or {}
+        if automation.get("state") == "running":
+            self._json(HTTPStatus.OK, {"accepted": False, "state": "running"})
+            return
+
+        try:
+            self.server.worker_trigger.parent.mkdir(parents=True, exist_ok=True)
+            self.server.worker_trigger.touch(exist_ok=True)
+        except OSError as err:
+            self.log_error("could not request worker run: %s", err)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "could not request automation run")
+            return
+        self._json(HTTPStatus.ACCEPTED, {
+            "accepted": True,
+            "state": "queued",
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        })
+
 
 def lan_addresses(port: int) -> list[str]:
     addresses = {"127.0.0.1"}
@@ -306,6 +345,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--token-file", type=Path, help="read bearer token from a private file")
     parser.add_argument("--cache-seconds", type=float, default=5.0, help="index cache lifetime")
     parser.add_argument("--worker-status", type=Path, help="optional worker status JSON file")
+    parser.add_argument("--worker-trigger", type=Path, help="file used to request an immediate worker run")
     return parser.parse_args(argv)
 
 
@@ -326,7 +366,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     index = LibraryIndex(args.library, max(0.0, args.cache_seconds))
     index.rebuild()
-    server = PressReaderSyncServer((args.host, args.port), index, token, args.worker_status)
+    server = PressReaderSyncServer(
+        (args.host, args.port), index, token, args.worker_status, args.worker_trigger
+    )
     print(f"PressReader Sync Bridge: {len(index.publications())} publication(s)")
     for address in lan_addresses(server.server_address[1]):
         print(f"  {address}")

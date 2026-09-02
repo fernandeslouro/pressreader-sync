@@ -62,6 +62,10 @@ function PressReaderSync:onDispatcherRegisterActions()
         category = "none", event = "PressReaderSyncRemoveOld",
         title = _("PressReader Sync: remove old editions"), general = true,
     })
+    Dispatcher:registerAction("pressreader_sync_trigger_automation", {
+        category = "none", event = "PressReaderSyncTriggerAutomation",
+        title = _("PressReader Sync: check PressReader now"), general = true,
+    })
 end
 
 function PressReaderSync:addToMainMenu(menu_items)
@@ -76,6 +80,10 @@ function PressReaderSync:addToMainMenu(menu_items)
             {
                 text = _("Download all latest editions"),
                 callback = function() self:onPressReaderSyncDownloadAllLatest() end,
+            },
+            {
+                text = _("Check PressReader for new editions now"),
+                callback = function() self:onPressReaderSyncTriggerAutomation() end,
             },
             {
                 text = _("Downloaded publications"),
@@ -150,6 +158,19 @@ function PressReaderSync:onPressReaderSyncBrowse()
             return self:client():publications()
         end)
         if publications then self:showPublications(publications) end
+    end)
+end
+
+function PressReaderSync:onPressReaderSyncTriggerAutomation()
+    self:withNetwork(function()
+        local result = self:showBusy(_("Requesting a new PressReader check…"), function()
+            return self:client():triggerAutomation()
+        end)
+        if not result then return end
+        local message = result.accepted
+            and _("The server is checking PressReader for new editions. This runs in the background; check synchronization status for progress.")
+            or _("The server is already checking PressReader for new editions.")
+        UIManager:show(InfoMessage:new{ text = message })
     end)
 end
 

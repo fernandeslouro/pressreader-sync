@@ -16,11 +16,13 @@ services:
       - ${PRESSREADER_SYNC_TOKEN:?Set PRESSREADER_SYNC_TOKEN in deploy/.env}
       - --worker-status
       - /state/worker-status.json
+      - --worker-trigger
+      - /state/run-requested
     ports:
       - "${PRESSREADER_SYNC_BIND:-0.0.0.0}:8787:8787"
     volumes:
       - ./data/library:/library:ro
-      - ./data/state:/state:ro
+      - ./data/state:/state
     security_opt:
       - no-new-privileges:true
 
