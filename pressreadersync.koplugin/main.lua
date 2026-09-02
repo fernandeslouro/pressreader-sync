@@ -44,6 +44,32 @@ local function publicationNameFromDownloadedFilename(name)
     return name:match("^%d%d%d%d%-%d%d%-%d%d %- (.+)%-[%da-fA-F]+%.[%w]+$")
 end
 
+local function serverCheckSubtitle(automation)
+    if not automation then return _("Last server check: unavailable") end
+    if automation.state == "running" then return _("Server check in progress") end
+    local seconds = tonumber(automation.finished_seconds_ago)
+    if not seconds then return _("Last server check: unknown") end
+    if seconds < 60 then return _("Last server check: just now") end
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    if hours == 0 then
+        if minutes == 1 then return _("Last server check: 1 minute ago") end
+        return T(_("Last server check: %1 minutes ago"), minutes)
+    end
+    if minutes == 0 then
+        if hours == 1 then return _("Last server check: 1 hour ago") end
+        return T(_("Last server check: %1 hours ago"), hours)
+    end
+    if hours == 1 and minutes == 1 then
+        return _("Last server check: 1 hour, 1 minute ago")
+    elseif hours == 1 then
+        return T(_("Last server check: 1 hour, %1 minutes ago"), minutes)
+    elseif minutes == 1 then
+        return T(_("Last server check: %1 hours, 1 minute ago"), hours)
+    end
+    return T(_("Last server check: %1 hours, %2 minutes ago"), hours, minutes)
+end
+
 function PressReaderSync:init()
     self.settings = LuaSettings:open(self.settings_file)
     self:onDispatcherRegisterActions()
@@ -154,10 +180,14 @@ end
 
 function PressReaderSync:onPressReaderSyncBrowse()
     self:withNetwork(function()
-        local publications = self:showBusy(_("Loading publications…"), function()
-            return self:client():publications()
+        local result = self:showBusy(_("Loading publications…"), function()
+            local client = self:client()
+            local publications, err = client:publications()
+            if not publications then return nil, err end
+            local status = client:status()
+            return { publications = publications, automation = status and status.automation }
         end)
-        if publications then self:showPublications(publications) end
+        if result then self:showPublications(result.publications, result.automation) end
     end)
 end
 
@@ -174,7 +204,7 @@ function PressReaderSync:onPressReaderSyncTriggerAutomation()
     end)
 end
 
-function PressReaderSync:showPublications(publications)
+function PressReaderSync:showPublications(publications, automation)
     if #publications == 0 then
         UIManager:show(InfoMessage:new{ text = _("No publications found. Add files to the bridge library and try again.") })
         return
@@ -190,7 +220,7 @@ function PressReaderSync:showPublications(publications)
     local menu
     menu = Menu:new{
         title = _("PressReader Sync publications"),
-        subtitle = _("Tap to browse editions"),
+        subtitle = serverCheckSubtitle(automation),
         item_table = items,
         is_popout = false,
         is_borderless = true,
