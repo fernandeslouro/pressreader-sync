@@ -80,13 +80,21 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(payload["automation"]["state"], "ok")
         self.assertEqual(payload["automation"]["exported"], 1)
 
-    def test_status_includes_age_of_last_completed_check(self):
-        finished = datetime.now(timezone.utc) - timedelta(seconds=90)
+    def test_status_ages_the_full_fetch_instead_of_a_retry(self):
+        full_fetch = datetime.now(timezone.utc) - timedelta(seconds=90)
+        retry = datetime.now(timezone.utc) - timedelta(seconds=10)
         self.worker_status.write_text(
-            json.dumps({"state": "ok", "finished_at": finished.isoformat()}), encoding="utf-8"
+            json.dumps({
+                "state": "ok",
+                "finished_at": retry.isoformat(),
+                "full_fetch_finished_at": full_fetch.isoformat(),
+            }),
+            encoding="utf-8",
         )
         _, _, raw = self.request("/v1/status")
-        age = json.loads(raw)["automation"]["finished_seconds_ago"]
+        automation = json.loads(raw)["automation"]
+        age = automation["full_fetch_finished_seconds_ago"]
+        self.assertNotIn("finished_seconds_ago", automation)
         self.assertGreaterEqual(age, 89)
         self.assertLessEqual(age, 92)
 

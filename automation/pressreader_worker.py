@@ -113,6 +113,7 @@ class RunStatus:
     state: str = "starting"
     started_at: str = ""
     finished_at: str = ""
+    full_fetch_finished_at: str = ""
     next_run_at: str = ""
     discovered: int = 0
     attempted: int = 0
@@ -236,7 +237,14 @@ class StateStore:
         return sorted(retries, key=lambda item: str(item.get("next_retry_at", "")))
 
     def write_status(self, status: RunStatus) -> None:
-        self._atomic_json(self.status_path, asdict(status))
+        payload = asdict(status)
+        if not payload["full_fetch_finished_at"]:
+            previous = self._load(self.status_path, {})
+            if isinstance(previous, dict):
+                payload["full_fetch_finished_at"] = str(
+                    previous.get("full_fetch_finished_at", "")
+                )
+        self._atomic_json(self.status_path, payload)
 
 
 class PressReaderAutomation:
@@ -738,6 +746,8 @@ def main(argv: list[str] | None = None) -> int:
         return interactive_login(args.profile)
     if args.command == "once":
         status = run_cycle(args.profile, args.library, args.state, args.diagnostics, args.catalog_url, args.limit)
+        status.full_fetch_finished_at = status.finished_at
+        StateStore(args.state).write_status(status)
         return 1 if status.errors else 0
     interval = max(300, args.interval)
     next_regular_run = 0.0
@@ -753,6 +763,7 @@ def main(argv: list[str] | None = None) -> int:
             args.catalog_url, args.limit, retry_only=retry_only,
         )
         if not retry_only:
+            status.full_fetch_finished_at = status.finished_at
             next_regular_run = cycle_started + interval
         state = StateStore(args.state)
         state.defer_overdue_retries()

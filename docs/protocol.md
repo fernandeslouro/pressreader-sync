@@ -52,4 +52,6 @@ bridge was started without `--worker-trigger`.
 
 When the optional worker status file is configured, `/v1/status` also contains
 an `automation` object with the last run state, timestamps, discovered/exported
-counts, and errors.
+counts, and errors. `full_fetch_finished_at` and
+`full_fetch_finished_seconds_ago` refer only to complete publication scans;
+retry-only cycles do not change them.
