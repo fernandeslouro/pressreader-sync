@@ -723,7 +723,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--library", type=Path, default=Path("/library"))
     parser.add_argument("--state", type=Path, default=Path("/state"))
     parser.add_argument("--diagnostics", type=Path, default=Path("/state/diagnostics"))
-    parser.add_argument("--trigger", type=Path, default=Path("/state/run-requested"))
+    parser.add_argument(
+        "--trigger", type=Path,
+        help="manual-run signal file (default: run-requested inside --state)",
+    )
     parser.add_argument("--catalog-url", default=os.environ.get("PRESSREADER_CATALOG_URL", DEFAULT_CATALOG_URL))
     parser.add_argument(
         "--interval",
@@ -750,9 +753,10 @@ def main(argv: list[str] | None = None) -> int:
         StateStore(args.state).write_status(status)
         return 1 if status.errors else 0
     interval = max(300, args.interval)
+    trigger = args.trigger or args.state / "run-requested"
     next_regular_run = 0.0
     # The immediate startup cycle satisfies any request left behind by a restart.
-    consume_run_request(args.trigger)
+    consume_run_request(trigger)
     manually_requested = False
     while not STOP:
         cycle_started = time.time()
@@ -777,7 +781,7 @@ def main(argv: list[str] | None = None) -> int:
         for _ in range(remaining):
             if STOP:
                 break
-            if consume_run_request(args.trigger):
+            if consume_run_request(trigger):
                 manually_requested = True
                 LOG.info("Immediate check requested")
                 break
