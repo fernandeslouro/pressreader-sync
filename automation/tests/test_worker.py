@@ -38,6 +38,11 @@ class WorkerHelpersTest(unittest.TestCase):
             self.assertFalse(trigger.exists())
             self.assertFalse(self.worker.consume_run_request(trigger))
 
+    def test_trigger_defaults_to_the_configured_state_directory(self):
+        args = self.worker.parse_args(["run", "--state", "/tmp/custom-state"])
+        trigger = args.trigger or args.state / "run-requested"
+        self.assertEqual(trigger, Path("/tmp/custom-state/run-requested"))
+
     def test_retry_status_preserves_last_full_fetch(self):
         with tempfile.TemporaryDirectory() as temp:
             state = self.worker.StateStore(Path(temp))
