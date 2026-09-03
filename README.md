@@ -116,7 +116,9 @@ python3 -m unittest discover -s bridge/tests -v
 Or run all available syntax and integration checks with `make test`.
 
 The plugin targets the current KOReader plugin APIs and uses only modules that
-ship with KOReader.
+ship with KOReader. Transient network and DNS failures are retried up to six
+times over 30 seconds, allowing hotspot DNS forwarding time to settle after
+Wi-Fi reconnects.
 
 Known limitations and follow-up work are tracked in
 [`docs/known-issues.md`](docs/known-issues.md).

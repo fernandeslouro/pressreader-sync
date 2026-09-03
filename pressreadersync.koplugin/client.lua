@@ -6,8 +6,8 @@ local socketutil = require("socketutil")
 local Client = {}
 Client.__index = Client
 
-local MAX_ATTEMPTS = 3
-local RETRY_DELAY_SECONDS = 0.5
+local MAX_ATTEMPTS = 6
+local RETRY_DELAYS_SECONDS = { 1, 2, 4, 8, 15 }
 local RETRYABLE_HTTP_CODES = {
     [408] = true, [425] = true, [429] = true,
     [500] = true, [502] = true, [503] = true, [504] = true,
@@ -89,7 +89,8 @@ function Client:_performRequest(request, block_timeout, total_timeout)
 end
 
 function Client:_waitBeforeRetry(attempt)
-    socket.sleep(RETRY_DELAY_SECONDS * attempt)
+    local delay = RETRY_DELAYS_SECONDS[attempt] or RETRY_DELAYS_SECONDS[#RETRY_DELAYS_SECONDS]
+    socket.sleep(delay)
 end
 
 function Client:get(path)
