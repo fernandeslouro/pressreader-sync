@@ -38,6 +38,20 @@ class WorkerHelpersTest(unittest.TestCase):
             self.assertFalse(trigger.exists())
             self.assertFalse(self.worker.consume_run_request(trigger))
 
+    def test_retry_status_preserves_last_full_fetch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = self.worker.StateStore(Path(temp))
+            state.write_status(self.worker.RunStatus(
+                state="ok", full_fetch_finished_at="2026-09-03T00:00:00+00:00"
+            ))
+            state.write_status(self.worker.RunStatus(
+                state="ok", finished_at="2026-09-03T01:00:00+00:00"
+            ))
+            saved = json.loads((Path(temp) / "worker-status.json").read_text())
+            self.assertEqual(
+                saved["full_fetch_finished_at"], "2026-09-03T00:00:00+00:00"
+            )
+
     def test_issue_date(self):
         self.assertEqual(self.worker.parse_issue_date("Issue Date 18 Jul 2026"), "2026-07-18")
         self.assertIsNone(self.worker.parse_issue_date("Issue date unavailable"))

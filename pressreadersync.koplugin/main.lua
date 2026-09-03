@@ -46,8 +46,7 @@ end
 
 local function serverCheckSubtitle(automation)
     if not automation then return _("Last server check: unavailable") end
-    if automation.state == "running" then return _("Server check in progress") end
-    local seconds = tonumber(automation.finished_seconds_ago)
+    local seconds = tonumber(automation.full_fetch_finished_seconds_ago)
     if not seconds then return _("Last server check: unknown") end
     if seconds < 60 then return _("Last server check: just now") end
     local hours = math.floor(seconds / 3600)
