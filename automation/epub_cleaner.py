@@ -43,7 +43,7 @@ BYLINE_PARTICLES = {
     "LOS": "los", "VAN": "van", "VON": "von", "Y": "y",
 }
 
-READER_CSS = b"""/* Pressko KOReader stylesheet v6; deliberately device-neutral. */
+READER_CSS = b"""/* Pressko KOReader stylesheet v9; deliberately device-neutral. */
 html { -webkit-text-size-adjust: 100%; }
 DocFragment { page-break-before: auto !important; }
 body {
@@ -53,8 +53,31 @@ body {
   orphans: 2;
   widows: 2;
 }
+body.articles { margin-top: 1.4em; }
 .article { margin: 0; padding: 0; }
 .article + .article { margin-top: 1.4em; }
+.section-heading {
+  margin: 0 0 0.85em;
+  padding: 0.3em 0 0;
+  border-top: 0.12em solid currentColor;
+  break-inside: avoid;
+  page-break-inside: avoid;
+  break-after: avoid;
+  page-break-after: avoid;
+}
+.article + .section-heading { margin-top: 2em; }
+.section-heading h3 {
+  margin: 0;
+  padding: 0;
+  font-size: 0.82em;
+  line-height: 1.2;
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  break-before: avoid;
+  page-break-before: avoid !important;
+}
+.section-heading + .article { margin-top: 0; }
 .article-header {
   margin: 0 0 0.65em;
   padding: 0;
@@ -651,6 +674,11 @@ def _decorate_clean_markup(root: ET.Element) -> int:
         return 0
     if any(_local_name(item.tag) == "ol" for item in body):
         body.set("class", "toc")
+    elif any(
+        _local_name(item.tag) == "div" and item.get("id")
+        for item in body
+    ):
+        body.set("class", "articles")
     for article in list(body):
         if _local_name(article.tag) != "div" or not article.get("id"):
             continue
@@ -815,6 +843,45 @@ def _deduplicate_navigation(nodes: list[NavigationNode]) -> list[NavigationNode]
     return prune(nodes)
 
 
+def _insert_section_headings(
+    documents: dict[str, bytes],
+    nodes: list[NavigationNode],
+) -> None:
+    """Put source navigation sections into the linear article reading flow."""
+    targets_by_document: dict[str, dict[str, list[str]]] = defaultdict(dict)
+
+    def collect(items: list[NavigationNode]) -> None:
+        for node in items:
+            if node.article is None:
+                first = node.first_article()
+                label = re.sub(r"\s+", " ", node.title).strip()
+                if first is not None and label:
+                    labels = targets_by_document[first.document].setdefault(
+                        first.article_id, []
+                    )
+                    if label not in labels:
+                        labels.append(label)
+            collect(node.children)
+
+    collect(nodes)
+    for document, targets in targets_by_document.items():
+        root = _parse_xml(documents[document], document)
+        body = next((item for item in root.iter() if _local_name(item.tag) == "body"), None)
+        if body is None:
+            continue
+        for article in list(body):
+            labels = targets.get(article.get("id", ""))
+            if not labels:
+                continue
+            position = list(body).index(article)
+            for label in labels:
+                heading = ET.Element(f"{{{XHTML_NS}}}div", {"class": "section-heading"})
+                ET.SubElement(heading, f"{{{XHTML_NS}}}h3").text = label
+                body.insert(position, heading)
+                position += 1
+        documents[document] = _serialize(root, XHTML_NS)
+
+
 def _build_ncx(old_data: bytes, nodes: list[NavigationNode], ncx_path: str) -> bytes:
     old = _parse_xml(old_data, "toc.ncx")
     root = ET.Element(f"{{{NCX_NS}}}ncx", {"version": "2005-1"})
@@ -855,6 +922,7 @@ def _clean_document(
     head = next((item for item in root.iter() if _local_name(item.tag) == "head"), None)
     if body is None or head is None:
         return None, [], 0
+    body.set("class", "articles")
 
     retained: list[Article] = []
     pullquote_elements_removed = 0
@@ -997,6 +1065,7 @@ def clean_pressreader_epub(path: Path) -> CleanupStats:
         kept_assets |= _used_images(article.document, article.element, available)
 
     navigation = _extract_navigation(files[ncx_path], kept_articles, ncx_path)
+    _insert_section_headings(cleaned_documents, navigation)
     files[toc_path] = _build_toc_xhtml(navigation, toc_path)
     files[ncx_path] = _build_ncx(files[ncx_path], navigation, ncx_path)
     files[opf_path] = _update_opf(

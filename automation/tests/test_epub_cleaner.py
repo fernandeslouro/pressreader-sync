@@ -201,6 +201,9 @@ class EpubCleanerTest(unittest.TestCase):
                 self.assertNotIn("style=", text)
                 self.assertIn('class="article"', text)
                 self.assertIn('class="article-header"', text)
+                self.assertIn('<body class="articles">', text)
+                self.assertIn('<div class="section-heading"><h3>Europe</h3></div>', text)
+                self.assertIn('<div class="section-heading"><h3>Culture</h3></div>', text)
                 self.assertIn('class="media has-legend"', text)
                 self.assertIn('class="caption"', text)
                 self.assertIn('class="legend short"', text)
@@ -210,7 +213,12 @@ class EpubCleanerTest(unittest.TestCase):
                 self.assertIn("max-width: 100%", css)
                 self.assertNotIn("page-break-before: always", css)
                 self.assertIn("DocFragment { page-break-before: auto !important; }", css)
+                self.assertIn("body.articles { margin-top: 1.4em; }", css)
+                self.assertNotIn("body.articles { padding-top:", css)
                 self.assertIn(".article + .article { margin-top: 1.4em; }", css)
+                self.assertIn(".article + .section-heading { margin-top: 2em; }", css)
+                self.assertIn(".section-heading + .article { margin-top: 0; }", css)
+                self.assertIn("text-transform: uppercase", css)
                 self.assertIn(
                     ".article-header + * {\n  break-before: avoid;\n  page-break-before: avoid;\n}",
                     css,
