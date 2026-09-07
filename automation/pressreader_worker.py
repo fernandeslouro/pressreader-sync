@@ -51,6 +51,28 @@ def consume_run_request(path: Path) -> bool:
     return True
 
 
+def consume_publication_request(trigger: Path) -> str:
+    """Claim one publication, leaving requests for other titles queued."""
+    queue = trigger.with_name(trigger.name + ".publications")
+    for path in sorted(queue.glob("*.json")):
+        claimed = path.with_suffix(".claimed")
+        try:
+            path.replace(claimed)
+        except FileNotFoundError:
+            continue
+        try:
+            payload = json.loads(claimed.read_text(encoding="utf-8"))
+            title = payload.get("title")
+            if isinstance(title, str) and title.strip():
+                return title
+            LOG.warning("Ignoring invalid publication request: %s", claimed)
+        except (OSError, ValueError, AttributeError):
+            LOG.exception("Invalid publication request: %s", claimed)
+        finally:
+            claimed.unlink(missing_ok=True)
+    return ""
+
+
 def safe_component(value: str, fallback: str = "Publication") -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value).strip(" .")
@@ -608,6 +630,8 @@ def run_once(
                     for publication in publications
                     if publication.title.casefold() == only_title.casefold()
                 ]
+            if only_title and not publications:
+                raise RuntimeError(f"Publication not found in My Publications: {only_title}")
             if exclude_title:
                 publications = [
                     publication
@@ -668,9 +692,16 @@ def run_cycle(
     catalog_url: str,
     limit: int = 0,
     retry_only: bool = False,
+    only_title: str = "",
 ) -> RunStatus:
     special_proxy = os.environ.get("PRESSREADER_SYNC_SPECIAL_PROXY", "").strip()
     special_title = os.environ.get("PRESSREADER_SYNC_SPECIAL_TITLE", "").strip()
+    if only_title:
+        proxy = special_proxy if only_title.casefold() == special_title.casefold() else ""
+        return run_once(
+            profile, library, state_dir, diagnostics, catalog_url, limit,
+            proxy_server=proxy, only_title=only_title, retry_only=False,
+        )
     if not special_proxy or not special_title:
         return run_once(
             profile, library, state_dir, diagnostics, catalog_url, limit,
@@ -758,17 +789,19 @@ def main(argv: list[str] | None = None) -> int:
     # The immediate startup cycle satisfies any request left behind by a restart.
     consume_run_request(trigger)
     manually_requested = False
+    requested_title = ""
     while not STOP:
         cycle_started = time.time()
-        retry_only = not manually_requested and cycle_started < next_regular_run
+        retry_only = not manually_requested and not requested_title and cycle_started < next_regular_run
         manually_requested = False
         status = run_cycle(
             args.profile, args.library, args.state, args.diagnostics,
-            args.catalog_url, args.limit, retry_only=retry_only,
+            args.catalog_url, args.limit, retry_only=retry_only, only_title=requested_title,
         )
-        if not retry_only:
+        if not retry_only and not requested_title:
             status.full_fetch_finished_at = status.finished_at
             next_regular_run = cycle_started + interval
+        requested_title = ""
         state = StateStore(args.state)
         state.defer_overdue_retries()
         retry_at = state.next_retry_timestamp()
@@ -784,6 +817,10 @@ def main(argv: list[str] | None = None) -> int:
             if consume_run_request(trigger):
                 manually_requested = True
                 LOG.info("Immediate check requested")
+                break
+            requested_title = consume_publication_request(trigger)
+            if requested_title:
+                LOG.info("Latest edition requested for %s", requested_title)
                 break
             time.sleep(1)
     return 0

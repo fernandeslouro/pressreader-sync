@@ -49,7 +49,10 @@ You can also run `make package` and extract
 
 In KOReader open **Search (magnifier) → PressReader Sync → Settings**, enter the bridge
 URL (for example `http://192.168.1.20:8787`) and the same token. Then use
-**Browse publications** to choose and download an edition.
+**Browse publications** to choose and download an edition. Long press a publication
+to queue a fetch of its latest edition on the VPS. Check synchronization status
+for progress, then browse again to download it. This requires the updated bridge
+and worker with automation configured.
 
 Use **Download all latest editions** to fetch the newest available edition of
 every publication in one batch. Editions already downloaded at the expected

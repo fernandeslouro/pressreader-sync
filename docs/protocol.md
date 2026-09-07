@@ -11,6 +11,7 @@ sent as `Authorization: Bearer <token>`.
 | `GET /v1/latest?publication={id}` | Newest edition for one publication |
 | `GET /v1/files/{id}` | Edition bytes |
 | `POST /v1/automation/run` | Queue an immediate worker check |
+| `POST /v1/automation/run?publication={id}` | Queue a latest-edition fetch for one publication |
 
 Publication IDs and issue IDs are opaque. Clients must not derive filesystem
 paths from them. The current response schema is intentionally small:
@@ -55,3 +56,15 @@ an `automation` object with the last run state, timestamps, discovered/exported
 counts, and errors. `full_fetch_finished_at` and
 `full_fetch_finished_seconds_ago` refer only to complete publication scans;
 retry-only cycles do not change them.
+
+With `publication={id}`, the bridge validates the ID and returns `202` with
+`accepted`, `state: "queued"`, and `publication_id`. Requests are queued even
+while the worker is busy, and repeated pending requests for the same publication
+are coalesced. The worker checks only the selected title in My Publications,
+using its configured proxy if applicable. These checks do not reset the regular
+full-library schedule or full-fetch timestamp. A title no longer in My
+Publications produces an error in synchronization status.
+
+Publication requests use JSON files in a directory named
+`<worker-trigger>.publications` beside the existing trigger file. Upgrade both
+the bridge and worker before using this endpoint.

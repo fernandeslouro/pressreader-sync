@@ -13,6 +13,7 @@ import re
 import socket
 import sys
 import threading
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -307,12 +308,41 @@ class PressReaderSyncHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNAUTHORIZED, "invalid or missing token")
             return
 
-        path = urlsplit(self.path).path.rstrip("/") or "/"
+        parsed = urlsplit(self.path)
+        path = parsed.path.rstrip("/") or "/"
         if path != "/v1/automation/run":
             self._error(HTTPStatus.NOT_FOUND, "endpoint not found")
             return
         if not self.server.worker_trigger:
             self._error(HTTPStatus.NOT_IMPLEMENTED, "automation trigger is not configured")
+            return
+
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if "publication" in query:
+            publication_id = query["publication"][0]
+            publication = next((item for item in self.server.index.publications()
+                                if item.id == publication_id), None)
+            if publication is None:
+                self._error(HTTPStatus.NOT_FOUND, "publication not found")
+                return
+            queue = self.server.worker_trigger.with_name(self.server.worker_trigger.name + ".publications")
+            temporary = None
+            try:
+                queue.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=queue, delete=False) as handle:
+                    temporary = Path(handle.name)
+                    json.dump({"title": publication.title}, handle)
+                temporary.replace(queue / (publication.id + ".json"))
+            except OSError as err:
+                self.log_error("could not queue publication: %s", err)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "could not request publication fetch")
+                return
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            self._json(HTTPStatus.ACCEPTED, {
+                "accepted": True, "state": "queued", "publication_id": publication.id,
+            })
             return
 
         automation = self._automation_status() or {}

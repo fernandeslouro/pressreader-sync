@@ -38,6 +38,52 @@ class WorkerHelpersTest(unittest.TestCase):
             self.assertFalse(trigger.exists())
             self.assertFalse(self.worker.consume_run_request(trigger))
 
+    def test_publication_queue_consumes_one_title_at_a_time(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trigger = Path(temp) / "custom-trigger"
+            queue = trigger.with_name("custom-trigger.publications")
+            queue.mkdir()
+            for name, title in [("a", "Daily"), ("b", "Weekly")]:
+                (queue / (name + ".json")).write_text(json.dumps({"title": title}))
+            self.assertEqual(self.worker.consume_publication_request(trigger), "Daily")
+            self.assertEqual(self.worker.consume_publication_request(trigger), "Weekly")
+            self.assertEqual(self.worker.consume_publication_request(trigger), "")
+            self.assertEqual(list(queue.iterdir()), [])
+
+    def test_targeted_cycle_uses_correct_proxy_and_bypasses_retry_filter(self):
+        with mock.patch.dict(self.worker.os.environ, {
+            "PRESSREADER_SYNC_SPECIAL_PROXY": "http://proxy:8888",
+            "PRESSREADER_SYNC_SPECIAL_TITLE": "Special",
+        }), mock.patch.object(self.worker, "run_once") as run:
+            for title, proxy in [("Special", "http://proxy:8888"), ("Daily", "")]:
+                run.reset_mock()
+                self.worker.run_cycle(None, None, None, None, "catalog", only_title=title, retry_only=True)
+                run.assert_called_once_with(
+                    None, None, None, None, "catalog", 0,
+                    proxy_server=proxy, only_title=title, retry_only=False,
+                )
+
+    def test_targeted_run_exports_only_matching_publication(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(self.worker, "sync_playwright"), \
+                mock.patch.object(self.worker, "launch_context"), \
+                mock.patch.object(self.worker, "PressReaderAutomation") as automation:
+            instance = automation.return_value
+            selected = self.worker.PublicationLink("Daily", "https://pressreader.com/daily")
+            instance.discover_my_publications.return_value = [
+                selected, self.worker.PublicationLink("Weekly", "https://pressreader.com/weekly")
+            ]
+            instance.export_latest.return_value = "exported"
+            root = Path(temp)
+            result = self.worker.run_once(root, root, root, root, "catalog", only_title="Daily")
+            instance.export_latest.assert_called_once_with(selected)
+            self.assertEqual(result.exported, 1)
+            self.assertEqual(result.full_fetch_finished_at, "")
+            instance.export_latest.reset_mock()
+            result = self.worker.run_once(root, root, root, root, "catalog", only_title="Missing")
+            instance.export_latest.assert_not_called()
+            self.assertEqual(result.state, "error")
+
     def test_trigger_defaults_to_the_configured_state_directory(self):
         args = self.worker.parse_args(["run", "--state", "/tmp/custom-state"])
         trigger = args.trigger or args.state / "run-requested"

@@ -170,8 +170,10 @@ function Client:status()
     return self:get("/v1/status")
 end
 
-function Client:triggerAutomation()
-    return self:post("/v1/automation/run")
+function Client:triggerAutomation(publication_id)
+    local path = "/v1/automation/run"
+    if publication_id then path = path .. "?publication=" .. urlEncode(publication_id) end
+    return self:post(path)
 end
 
 function Client:download(issue, destination)

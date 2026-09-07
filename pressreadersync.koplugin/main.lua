@@ -203,6 +203,18 @@ function PressReaderSync:onPressReaderSyncTriggerAutomation()
     end)
 end
 
+function PressReaderSync:fetchLatestPublication(publication)
+    self:withNetwork(function()
+        local result = self:showBusy(T(_("Requesting the latest edition of %1…"), publication.title), function()
+            return self:client():triggerAutomation(publication.id)
+        end)
+        if not result then return end
+        UIManager:show(InfoMessage:new{
+            text = T(_("Latest edition fetch queued for %1 on the server. Check synchronization status for progress, then browse again to download the edition."), publication.title),
+        })
+    end)
+end
+
 function PressReaderSync:showPublications(publications, automation)
     if #publications == 0 then
         UIManager:show(InfoMessage:new{ text = _("No publications found. Add files to the bridge library and try again.") })
@@ -226,6 +238,10 @@ function PressReaderSync:showPublications(publications, automation)
         title_bar_fm_style = true,
         onMenuSelect = function(menu_widget, item)
             self:loadIssues(item.publication)
+        end,
+        onMenuHold = function(menu_widget, item)
+            self:fetchLatestPublication(item.publication)
+            return true
         end,
     }
     self.active_menu = menu

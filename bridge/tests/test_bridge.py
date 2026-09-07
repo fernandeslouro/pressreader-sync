@@ -114,6 +114,27 @@ class BridgeTest(unittest.TestCase):
         self.assertFalse(payload["accepted"])
         self.assertFalse(self.worker_trigger.exists())
 
+    def test_publication_fetch_queues_only_selected_title_even_while_running(self):
+        self.worker_status.write_text('{"state":"running"}', encoding="utf-8")
+        publication = self.server.index.publications()[0]
+        for _ in range(2):
+            status, _, raw = self.request(
+                f"/v1/automation/run?publication={publication.id}", method="POST"
+            )
+            self.assertEqual(status, 202)
+            self.assertEqual(json.loads(raw)["publication_id"], publication.id)
+        queue = self.worker_trigger.with_name("run-requested.publications")
+        self.assertEqual(len(list(queue.iterdir())), 1)
+        self.assertEqual(json.loads(next(queue.iterdir()).read_text()), {"title": publication.title})
+        self.assertFalse(self.worker_trigger.exists())
+
+    def test_publication_fetch_rejects_unknown_id_and_requires_authentication(self):
+        for token, expected in [("secret", 404), (None, 401)]:
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                self.request("/v1/automation/run?publication=unknown", token=token, method="POST")
+            self.assertEqual(context.exception.code, expected)
+        self.assertFalse(self.worker_trigger.with_name("run-requested.publications").exists())
+
     def test_unknown_ids_are_404(self):
         with self.assertRaises(urllib.error.HTTPError) as context:
             self.request("/v1/files/not-real")
