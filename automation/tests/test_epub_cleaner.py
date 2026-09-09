@@ -155,7 +155,10 @@ class EpubCleanerTest(unittest.TestCase):
           </navPoint>
         </navMap></ncx>"""
         container = """<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"""
-        cover = f"""<?xml version="1.0"?><html xmlns="{XHTML}"><head><title>Cover</title></head><body><img src="cover.jpeg"/></body></html>"""
+        cover = f"""<?xml version="1.0"?><html xmlns="{XHTML}"><head><title>Cover</title></head><body>
+          <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 412 792" preserveAspectRatio="none">
+            <image xmlns:xlink="http://www.w3.org/1999/xlink" width="412" height="792" xlink:href="cover.jpeg"/>
+          </svg></body></html>"""
         files = {
             "mimetype": b"application/epub+zip", "META-INF/container.xml": container.encode(),
             "OEBPS/content.opf": opf.encode(), "OEBPS/toc.ncx": ncx.encode(),
@@ -266,6 +269,49 @@ class EpubCleanerTest(unittest.TestCase):
                                     posixpath.dirname(name), reference.split("#", 1)[0]
                                 ))
                                 self.assertIn(target, names, f"broken reference from {name}: {reference}")
+
+    def test_cover_and_nested_images_keep_proportions(self):
+        svg_ns = "http://www.w3.org/2000/svg"
+        with tempfile.TemporaryDirectory() as temp:
+            epub = Path(temp) / "issue.epub"
+            self.make_epub(epub)
+            clean_pressreader_epub(epub)
+            with zipfile.ZipFile(epub) as archive:
+                files = {name: archive.read(name) for name in archive.namelist()}
+            root = ET.fromstring(files["OEBPS/cover.xhtml"])
+            svg = root.find(f".//{{{svg_ns}}}svg")
+            self.assertEqual(svg.get("preserveAspectRatio"), "xMidYMid meet")
+            self.assertEqual(svg.get("viewBox"), "0 0 412 792")
+            self.assertEqual(files["OEBPS/cover.jpeg"], b"cover")
+
+            # Simulate upgrading an older cleaned issue with a stretched cover
+            # and an image nested outside the usual .media wrapper.
+            svg.set("preserveAspectRatio", "none")
+            body = root.find(f"{{{XHTML}}}body")
+            wrapper = ET.SubElement(body, f"{{{XHTML}}}div")
+            ET.SubElement(wrapper, f"{{{XHTML}}}img", {
+                "src": "cover.jpeg", "width": "1000", "height": "200",
+                "style": "width: 100% !important; height: 100px !important; max-height: 50px; border: 0",
+            })
+            files["OEBPS/cover.xhtml"] = ET.tostring(root)
+            with zipfile.ZipFile(epub, "w") as archive:
+                for name, data in files.items():
+                    archive.writestr(name, data)
+            style_pressreader_epub(epub)
+            with zipfile.ZipFile(epub) as archive:
+                upgraded = archive.read("OEBPS/cover.xhtml")
+                root = ET.fromstring(upgraded)
+                for item in root.iter():
+                    if item.tag in {f"{{{svg_ns}}}svg", f"{{{svg_ns}}}image"}:
+                        self.assertEqual(item.get("preserveAspectRatio"), "xMidYMid meet")
+                img = root.find(f".//{{{XHTML}}}img")
+                self.assertIsNone(img.get("width"))
+                self.assertIsNone(img.get("height"))
+                self.assertEqual(img.get("style"), "border: 0")
+                self.assertEqual(archive.read("OEBPS/cover.jpeg"), b"cover")
+            style_pressreader_epub(epub)
+            with zipfile.ZipFile(epub) as archive:
+                self.assertEqual(archive.read("OEBPS/cover.xhtml"), upgraded)
 
     def test_style_only_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp:

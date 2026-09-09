@@ -28,6 +28,7 @@ NCX_NS = "http://www.daisy.org/z3986/2005/ncx/"
 DC_NS = "http://purl.org/dc/elements/1.1/"
 CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
 XLINK_NS = "http://www.w3.org/1999/xlink"
+SVG_NS = "http://www.w3.org/2000/svg"
 READER_STYLE_NAME = "pressko.css"
 PULLQUOTE_EXCLUDED_CLASSES = {
     "annotation", "article-header", "byline", "caption", "image-credit",
@@ -43,7 +44,7 @@ BYLINE_PARTICLES = {
     "LOS": "los", "VAN": "van", "VON": "von", "Y": "y",
 }
 
-READER_CSS = b"""/* Pressko KOReader stylesheet v9; deliberately device-neutral. */
+READER_CSS = b"""/* Pressko KOReader stylesheet v10; deliberately device-neutral. */
 html { -webkit-text-size-adjust: 100%; }
 DocFragment { page-break-before: auto !important; }
 body {
@@ -143,12 +144,11 @@ p { margin: 0 0 0.16em; padding: 0; }
   break-inside: avoid;
   page-break-inside: avoid;
 }
-.media img,
-body > img {
+img {
   display: block;
-  width: auto;
-  height: auto;
-  max-width: 100%;
+  width: auto !important;
+  height: auto !important;
+  max-width: 100% !important;
   margin: 0 auto;
   padding: 0;
   object-fit: contain;
@@ -718,6 +718,30 @@ def _decorate_clean_markup(root: ET.Element) -> int:
     )
 
 
+def _preserve_image_proportions(root: ET.Element) -> None:
+    """Fit images without stretching, including PressReader's SVG covers."""
+    for element in root.iter():
+        if element.tag in {f"{{{SVG_NS}}}svg", f"{{{SVG_NS}}}image"}:
+            # Keep the viewport and viewBox: meet fits the whole image inside
+            # them, leaving margins when the screen has different proportions.
+            element.set("preserveAspectRatio", "xMidYMid meet")
+        elif _local_name(element.tag) == "img":
+            element.attrib.pop("width", None)
+            element.attrib.pop("height", None)
+            # Inline !important declarations can otherwise override our CSS.
+            style = element.get("style")
+            if style:
+                declarations = [
+                    declaration.strip() for declaration in style.split(";")
+                    if declaration.strip() and declaration.split(":", 1)[0].strip().lower()
+                    not in {"width", "height", "min-width", "min-height", "max-width", "max-height", "object-fit"}
+                ]
+                if declarations:
+                    element.set("style", "; ".join(declarations))
+                else:
+                    element.attrib.pop("style", None)
+
+
 def _apply_reader_style(
     files: dict[str, bytes],
     opf_path: str,
@@ -757,6 +781,7 @@ def _apply_reader_style(
         root = _parse_xml(files[document], document)
         if decorate:
             pullquote_elements_removed += _decorate_clean_markup(root)
+        _preserve_image_proportions(root)
         _add_stylesheet_link(root, document, stylesheet)
         files[document] = _serialize(root, XHTML_NS)
     return pullquote_elements_removed
