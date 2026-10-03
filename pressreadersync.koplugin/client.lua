@@ -1,10 +1,35 @@
 local http = require("socket.http")
+local https = require("ssl.https")
 local rapidjson = require("rapidjson")
 local socket = require("socket")
 local socketutil = require("socketutil")
 
 local Client = {}
 Client.__index = Client
+
+-- Older Kobo glibc keeps the first network's DNS servers for the process
+-- lifetime. Retries and forked workers inherit those servers after Wi-Fi
+-- changes. Reload the current DHCP resolver configuration before requests.
+-- Other platforms may not expose this optional resolver API.
+local refreshResolver
+do
+    local ok, ffi = pcall(require, "ffi")
+    if ok and ffi.os == "Linux" then
+        local declared = pcall(ffi.cdef, [[
+            int res_init(void);
+            int __res_init(void);
+        ]])
+        if declared then
+            for _, symbol in ipairs({ "res_init", "__res_init" }) do
+                local found, fn = pcall(function() return ffi.C[symbol] end)
+                if found then
+                    refreshResolver = fn
+                    break
+                end
+            end
+        end
+    end
+end
 
 local MAX_ATTEMPTS = 3
 local RETRY_DELAY_SECONDS = 0.5
@@ -79,8 +104,10 @@ function Client:_headers()
 end
 
 function Client:_performRequest(request, block_timeout, total_timeout)
+    if refreshResolver then pcall(refreshResolver) end
     socketutil:set_timeout(block_timeout, total_timeout)
-    local request_ok, result, code, _, status = pcall(http.request, request)
+    local transport = request.url:match("^https://") and https or http
+    local request_ok, result, code, _, status = pcall(transport.request, request)
     socketutil:reset_timeout()
 
     if not request_ok then return nil, result end
