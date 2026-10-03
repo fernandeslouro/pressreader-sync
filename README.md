@@ -113,3 +113,11 @@ ship with KOReader.
 
 Known limitations and follow-up work are tracked in
 [`docs/known-issues.md`](docs/known-issues.md).
+### Switching Wi-Fi networks
+
+For sync wherever the Kobo has internet access, configure a public HTTPS bridge
+URL (or a bridge reachable through a VPN). A local bridge IP only works while
+the reader can reach that local network. The plugin supports HTTPS and reloads
+the current network's DNS settings before requests on older Kobo systems, which
+otherwise keep using the previous Wi-Fi network's DNS server. No particular
+Wi-Fi network, hotspot address, or DNS server is required.

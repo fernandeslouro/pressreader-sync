@@ -1,10 +1,12 @@
 .PHONY: test syntax package clean
 
 test: syntax
+	lua tests/test_client.lua
 	python3 -m unittest discover -s bridge/tests -v
 	python3 -m unittest discover -s automation/tests -v
 
 syntax:
+	luac -p tests/test_client.lua
 	python3 -m py_compile bridge/pressreader_sync_bridge.py bridge/tests/test_bridge.py
 	python3 -m py_compile automation/epub_cleaner.py automation/pressreader_worker.py automation/login_server.py automation/tests/test_worker.py automation/tests/test_epub_cleaner.py
 	luac -p pressreadersync.koplugin/main.lua
